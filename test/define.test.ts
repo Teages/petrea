@@ -820,6 +820,60 @@ describe('define', () => {
       `)
     })
 
+    it('parenthesizes by expression position, not adjacency (audit round 3)', () => {
+      // member objects in every spelling: `FLAG["x"]` and `FLAG .x` are
+      // member accesses regardless of what byte follows the reference
+      const output = transpile(
+        [
+          'log(FLAG["x"])',
+          'log(FLAG .x)',
+          'log(FLAG?.x)',
+          'log((FLAG).x)',
+          'log(FLAG)',
+        ].join('\n'),
+        { define: { FLAG: 'undefined' } },
+      )
+      expect(output).toContain('log((void 0)["x"])')
+      expect(output).toContain('log((void 0) .x)')
+      expect(output).toContain('log((void 0)?.x)')
+      expect(output).toContain('log((void 0).x)')
+      expect(output).toContain('log(void 0)')
+      expect(output).toMatchInlineSnapshot(`
+        "log((void 0)["x"])
+        log((void 0) .x)
+        log((void 0)?.x)
+        log((void 0).x)
+        log(void 0)"
+      `)
+
+      const numeric = transpile(
+        'log(FLAG["toString"]()); log(FLAG .toString()); log(FLAG.x); log(2 ** FLAG)',
+        { define: { FLAG: '-1' } },
+      )
+      expect(numeric).toContain('log((-1)["toString"]())')
+      expect(numeric).toContain('log((-1) .toString())')
+      expect(numeric).toContain('log((-1).x)')
+      expect(numeric).toContain('log(2 ** -1)')
+      expect(numeric).toMatchInlineSnapshot(`"log((-1)["toString"]()); log((-1) .toString()); log((-1).x); log(2 ** -1)"`)
+    })
+
+    it('detaches through transparent TS wrappers (audit round 3)', () => {
+      const output = transpile('(flag as any)(); (flag!)(); flag();', {
+        define: { flag: 'obj.method' },
+      })
+      expect(output).toContain('(0, obj.method)();')
+      // through a wrapper the splice keeps the reference's own span, so the
+      // erased wrapper stays around the detached text — valid, receiver off
+      expect(output).toContain('((0, obj.method)       )();')
+      expect(output).toMatchInlineSnapshot(`"((0, obj.method)       )(); ((0, obj.method) )(); (0, obj.method)();"`)
+    })
+
+    it('rewrites escaped undefined-rooted chains by root span (audit round 3)', () => {
+      const output = transpile('log(FLAG)', { define: { FLAG: '\\u0075ndefined.x' } })
+      expect(output).toContain('log((void 0).x)')
+      expect(output).toMatchInlineSnapshot(`"log((void 0).x)"`)
+    })
+
     it('accepts negative numbers with position-aware parentheses (audit round 2)', () => {
       const output = transpile(
         [
@@ -836,7 +890,7 @@ describe('define', () => {
       )
       expect(output).toContain('log(-1)')
       expect(output).toContain('log(-1 * 2)')
-      expect(output).toContain('2 ** (-1)')
+      expect(output).toContain('2 ** -1')
       expect(output).toContain('(-1) ** 2')
       expect(output).toContain('x-(-1)')
       expect(output).toContain('-(-1)')
@@ -845,7 +899,7 @@ describe('define', () => {
       expect(output).toMatchInlineSnapshot(`
         "log(-1)
         log(-1 * 2)
-        const a = 2 ** (-1)
+        const a = 2 ** -1
         const b = (-1) ** 2
         const c = x-(-1)
         const d = -(-1)

@@ -240,11 +240,10 @@ fn parse_value(value: &str, allocator: &Allocator) -> Result<DefineValue, String
     // — and the shadow-immune spelling of that is `void 0`, also when the
     // value chains off it: `undefined.x` is `(void 0).x` there
     if matches!(&root, Some(ChainRoot::Ident(name)) if name == "undefined") {
-        // the expression slice is `undefined` or `undefined.rest`
-        let span = parsed.span();
-        let slice = &trimmed[span.start as usize..span.end as usize];
+        // `undefined` or `undefined.rest`; the chain's rest is sliced from
+        // the root node's span end, immune to escaped spellings of the root
         let text = if depth > 0 {
-            format!("(void 0){}", &slice["undefined".len()..])
+            format!("(void 0){}", &trimmed[root_span(&parsed).end as usize..])
         } else {
             "void 0".to_string()
         };
@@ -303,6 +302,15 @@ fn entity_root(expression: &Expression<'_>) -> Option<Option<ChainRoot>> {
         Expression::ImportMeta(_) => Some(Some(ChainRoot::ImportMeta)),
         Expression::StaticMemberExpression(member) => entity_root(&member.object),
         _ => None,
+    }
+}
+
+/// The span of the identifier/`this`/`import.meta` at a chain's bottom.
+fn root_span(expression: &Expression<'_>) -> oxc_span::Span {
+    match expression {
+        Expression::StaticMemberExpression(member) => root_span(&member.object),
+        Expression::ComputedMemberExpression(member) => root_span(&member.object),
+        other => other.span(),
     }
 }
 

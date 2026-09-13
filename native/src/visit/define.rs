@@ -64,10 +64,17 @@ impl<'a> Walker<'a> {
         value: &DefineValue,
         text: String,
     ) -> (String, Span) {
-        if value.dotted && let Some(top) = self.call_position(idx) {
+        if value.dotted
+            && let Some((top, only_parens)) = self.call_position_inner(idx)
+        {
+            // claiming the wrapper span requires every link between the
+            // reference and the call to be a plain paren; a TS wrapper's
+            // erasure blank must keep its own range, so the splice stays on
+            // the reference (printing `((0, x) …)` — valid, still detached)
+            let claimable = only_parens && top != idx;
             return (
                 format!("(0, {text})"),
-                if top == idx { span } else { self.node_kind(top).span() },
+                if claimable { self.node_kind(top).span() } else { span },
             );
         }
         (text, span)
@@ -189,12 +196,17 @@ impl<'a> Walker<'a> {
     /// substitution — and a string literal standing as the whole expression
     /// statement gets parenthesized so the output cannot grow a
     /// `"use strict"`-style directive.
-    /// The outermost node of the reference's parenthesis group, when that
-    /// group is the callee/tag of a call or tagged template — `(flag)()`
-    /// still binds a receiver, so the detachment must claim the parentheses.
-    /// Returns the reference itself for a direct callee/tag.
-    fn call_position(&self, idx: u32) -> Option<u32> {
+    /// The outermost node wrapping the reference, when that group is the
+    /// callee/tag of a call or tagged template — `(flag)()`, `(flag as any)()`
+    /// and `(flag!)()` all still bind a receiver, so the detachment must see
+    /// through plain parens and the transparent TS wrappers. Returns the
+    /// reference itself for a direct callee/tag.
+    /// The wrapper walk behind the receiver check: the outermost node, and
+    /// whether every link between it and the reference is a plain paren (a
+    /// TS wrapper's erased region cannot be claimed by a splice).
+    fn call_position_inner(&self, idx: u32) -> Option<(u32, bool)> {
         let mut top = idx;
+        let mut only_parens = true;
         loop {
             let parent = self.parent_of(top);
             if parent == u32::MAX {
@@ -203,11 +215,17 @@ impl<'a> Walker<'a> {
             let start = self.node_kind(top).span().start;
             match self.node_kind(parent) {
                 AstKind::ParenthesizedExpression(_) => top = parent,
+                AstKind::TSAsExpression(_)
+                | AstKind::TSSatisfiesExpression(_)
+                | AstKind::TSNonNullExpression(_) => {
+                    only_parens = false;
+                    top = parent;
+                }
                 AstKind::CallExpression(call) if call.callee.span().start == start => {
-                    return Some(top)
+                    return Some((top, only_parens))
                 }
                 AstKind::TaggedTemplateExpression(tag) if tag.tag.span().start == start => {
-                    return Some(top)
+                    return Some((top, only_parens))
                 }
                 _ => return None,
             }
@@ -320,27 +338,48 @@ impl<'a> Walker<'a> {
             },
             _ => value.text.clone(),
         };
-        // a `void 0` binds looser than a following `.` member
-        // (`void 0.x` is `void (0.x)`)
-        if text == "void 0" && self.followed_by_dot(span) {
+        // a `void 0` binds looser than any member access — including a
+        // bracketed or space-separated one — so the object position of a
+        // member splices it parenthesized (an adjacency byte-check would
+        // miss `FLAG["x"]` and `FLAG .x`)
+        if text == "void 0" && self.is_member_object(idx) {
             return "(void 0)".to_string();
         }
         // a negative literal fuses with a preceding `-` (`x-FLAG` → `x--1`),
-        // with either side of `**` (`-1 ** 2` and `2 ** -1` are syntax
-        // errors — esbuild emits the latter verbatim), and with a following
-        // `.` (`(-1).x`, which is also how esbuild prints it)
+        // with the left side of `**` (`-1 ** 2` is a syntax error; the right
+        // side is fine bare — `2 ** -1` — as esbuild prints it), and with a
+        // member access in any spelling (`(-1).x`, also esbuild's form)
         if value.negative
-            && (self.followed_by_dot(span)
+            && (self.is_member_object(idx)
                 || self.preceded_by_minus(span)
-                || self.is_exponent_operand(idx))
+                || self.is_exponent_left_operand(idx, span))
         {
             return format!("({text})");
         }
+        // a positive numeric only fuses with a directly adjacent `.` (any
+        // source whitespace survives the splice); a space is esbuild's form
         let mut text = text;
         if value.numeric && self.followed_by_dot(span) {
             text.push(' ');
         }
         text
+    }
+
+    /// Whether the node is the object of a member expression — any spelling:
+    /// `.x`, `["x"]`, `?.x`. A parenthesized reference already prints safe.
+    fn is_member_object(&self, idx: u32) -> bool {
+        let parent = self.parent_of(idx);
+        if parent == u32::MAX {
+            return false;
+        }
+        let start = self.node_kind(idx).span().start;
+        matches!(
+            self.node_kind(parent),
+            AstKind::StaticMemberExpression(member) if member.object.span().start == start
+        ) || matches!(
+            self.node_kind(parent),
+            AstKind::ComputedMemberExpression(member) if member.object.span().start == start
+        )
     }
 
     fn followed_by_dot(&self, span: Span) -> bool {
@@ -352,13 +391,14 @@ impl<'a> Walker<'a> {
             && self.src.as_bytes().get(span.start as usize - 1) == Some(&b'-')
     }
 
-    /// Either operand of `**`, where an unparenthesized negative literal is
-    /// a syntax error.
-    fn is_exponent_operand(&self, idx: u32) -> bool {
+    /// The left operand of `**`, where an unparenthesized negative literal
+    /// is a syntax error (the right side takes a unary operand fine).
+    fn is_exponent_left_operand(&self, idx: u32, span: Span) -> bool {
         matches!(
             self.node_kind(self.parent_of(idx)),
             AstKind::BinaryExpression(binary)
                 if binary.operator == BinaryOperator::Exponential
+                    && binary.left.span().start == span.start
         )
     }
 }
