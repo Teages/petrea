@@ -17,19 +17,21 @@ pub(crate) fn allocator_pool() -> &'static AllocatorPool {
     })
 }
 
-use crate::blank::blanker::UnsupportedSyntax;
+use crate::blank::blanker::{UnsupportedSyntax, Warning};
 use crate::defines::Defines;
 use crate::visit::walk::{blank_program, blank_program_utf16};
 
 pub struct TranspileOutput {
     pub code: String,
     pub unsupported: Vec<UnsupportedSyntax>,
+    pub warnings: Vec<Warning>,
 }
 
 /// UTF-16 path output: code units, with report offsets already UTF-16 code units.
 pub struct TranspileUnitsOutput {
     pub code: Vec<u16>,
     pub unsupported: Vec<UnsupportedSyntax>,
+    pub warnings: Vec<Warning>,
 }
 
 /// The API contract (`types.ts`) promises JS string indices (UTF-16 code
@@ -98,7 +100,7 @@ pub fn transpile(
         return Err(format!("failed to parse {filename}:\n{details}"));
     }
 
-    let (output, unsupported) =
+    let (output, unsupported, warnings) =
         blank_program(&return_value.program, input.as_str(), &return_value.tokens, defines.as_ref());
     // the input is still alive here but consumed by build_owned below, so the
     // report offsets (UTF-8 bytes) are converted to the promised UTF-16 units first
@@ -114,6 +116,7 @@ pub fn transpile(
     Ok(TranspileOutput {
         code: output.build_owned(input),
         unsupported,
+        warnings,
     })
 }
 
@@ -199,7 +202,7 @@ pub fn transpile_units(
         return Err(format!("failed to parse {filename}:\n{details}"));
     }
 
-    let (output, unsupported) = blank_program_utf16(
+    let (output, unsupported, warnings) = blank_program_utf16(
         &return_value.program,
         &units,
         &parse_copy,
@@ -218,9 +221,19 @@ pub fn transpile_units(
         })
         .collect();
 
+    let warnings = warnings
+        .into_iter()
+        .map(|warning| Warning {
+            start: unit_at(warning.start),
+            end: unit_at(warning.end),
+            ..warning
+        })
+        .collect();
+
     Ok(TranspileUnitsOutput {
         code: output.build_units_owned(units, &byte_to_unit),
         unsupported,
+        warnings,
     })
 }
 

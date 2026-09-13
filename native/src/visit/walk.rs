@@ -14,7 +14,7 @@ use oxc_syntax::node::NodeId;
 
 use super::{class, enums, expression, function, namespace, pattern, statement};
 use crate::blank::blank_string::BlankString;
-use crate::blank::blanker::{Blanker, UnsupportedSyntax};
+use crate::blank::blanker::{Blanker, UnsupportedSyntax, Warning};
 /// `Js`: JavaScript was (or may have been) emitted; `Blanked`: fully erased,
 /// no runtime code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -370,7 +370,7 @@ pub fn blank_program<'a>(
     src: &'a str,
     tokens: &'a [Token],
     defines: Option<&crate::defines::Defines>,
-) -> (BlankString, Vec<UnsupportedSyntax>) {
+) -> (BlankString, Vec<UnsupportedSyntax>, Vec<Warning>) {
     let mut flattener = Flattener::default();
     flattener.visit_program(program);
     let enum_indices = flattener.enum_indices;
@@ -410,7 +410,7 @@ pub fn blank_program<'a>(
     walker.visit_node_array(&indices, true, false);
 
     let blanker = walker.blanker;
-    (blanker.output, blanker.reports)
+    (blanker.output, blanker.reports, blanker.warnings)
 }
 
 /// UTF-16 variant of [`blank_program`]: `parse_copy` is the lossy UTF-8 copy
@@ -423,7 +423,7 @@ pub fn blank_program_utf16<'a>(
     byte_to_unit: &'a [u32],
     tokens: &'a [Token],
     defines: Option<&crate::defines::Defines>,
-) -> (BlankString, Vec<UnsupportedSyntax>) {
+) -> (BlankString, Vec<UnsupportedSyntax>, Vec<Warning>) {
     let mut flattener = Flattener::default();
     flattener.visit_program(program);
     let enum_indices = flattener.enum_indices;
@@ -462,7 +462,7 @@ pub fn blank_program_utf16<'a>(
     walker.visit_node_array(&indices, true, false);
 
     let blanker = walker.blanker;
-    (blanker.output, blanker.reports)
+    (blanker.output, blanker.reports, blanker.warnings)
 }
 
 /// Unit index of the unit starting at byte offset `pos` (maps are strictly increasing).

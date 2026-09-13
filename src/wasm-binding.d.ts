@@ -14,11 +14,13 @@ declare module '@petrea/binding-wasm32-wasip1' {
   export interface NativeResult {
     code: string
     unsupported: unknown[]
+    warnings: unknown[]
   }
 
   export interface NativeUnitsResult {
     code: Uint16Array
     unsupported: unknown[]
+    warnings: unknown[]
   }
 
   export function transpileAsync(

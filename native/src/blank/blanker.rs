@@ -12,12 +12,22 @@ pub struct UnsupportedSyntax {
     pub end: u32,
 }
 
+/// A recoverable condition the caller may want to surface; positions are
+/// byte offsets.
+#[derive(Debug, Clone)]
+pub struct Warning {
+    pub kind: &'static str,
+    pub start: u32,
+    pub end: u32,
+}
+
 pub struct Blanker<'a> {
     pub output: BlankString,
     pub tokens: TokenIndex<'a>,
     /// True while the previously emitted JS did not end with a `;`.
     pub semicolon_needed: bool,
     pub reports: Vec<UnsupportedSyntax>,
+    pub warnings: Vec<Warning>,
 }
 
 impl<'a> Blanker<'a> {
@@ -27,7 +37,18 @@ impl<'a> Blanker<'a> {
             tokens: TokenIndex::new(src, tokens),
             semicolon_needed: false,
             reports: Vec::new(),
+            warnings: Vec::new(),
         }
+    }
+
+    /// Record a warning; unlike [`report`](Self::report) it does not keep
+    /// source verbatim — the caller already handled the site.
+    pub fn warn(&mut self, kind: &'static str, span: Span) {
+        self.warnings.push(Warning {
+            kind,
+            start: span.start,
+            end: span.end,
+        });
     }
 
     /// Report an unsupported construct; its source stays in the output.

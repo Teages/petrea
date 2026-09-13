@@ -848,6 +848,44 @@ describe('define', () => {
       expect(transpile('<FLAG.X />', { define: { FLAG: 'Comp' }, lang: 'tsx' as never })).toContain('<Comp.X />')
     })
 
+    it('keeps optional-call short-circuit for unary callees (audit round 8)', () => {
+      const output = transpile('var calls = 0; try { FLAG?.(++calls) } catch {} ', {
+        define: { FLAG: 'undefined' },
+      })
+      expect(output).toContain('(void 0)?.(++calls)')
+      // the optional call short-circuits: the argument never runs
+      const calls = new Function(`var calls = 0; try { ${output} } catch {} return calls`)()
+      expect(calls).toBe(0)
+      expect(output).toMatchInlineSnapshot(`"var calls = 0; try { (void 0)?.(++calls) } catch {} "`)
+    })
+
+    it('keeps escaped spellings out of JSX tags (audit round 8)', () => {
+      const warnings: string[] = []
+      const output = transpile('<FLAG />', {
+        define: { FLAG: '\\u0043omp' },
+        lang: 'tsx' as never,
+        onWarn: warning => warnings.push(warning.type),
+      })
+      expect(output).toContain('<FLAG />')
+      expect(warnings).toEqual(['define-jsx-tag'])
+    })
+
+    it('warns when a JSX tag substitution is skipped (audit round 8)', () => {
+      const warnings: Array<{ type: string, start: number, end: number }> = []
+      const output = transpile('const a = <FLAG />; const b = <FLAG n={FLAG} />', {
+        define: { FLAG: 'component' },
+        lang: 'tsx' as never,
+        onWarn: warning => warnings.push(warning),
+      })
+      // only the tag position is skipped and warned; the attribute reads on
+      expect(output).toContain('<FLAG />')
+      expect(output).toContain('<FLAG n={component} />')
+      expect(warnings).toEqual([
+        { type: 'define-jsx-tag', start: 11, end: 15 },
+        { type: 'define-jsx-tag', start: 31, end: 35 },
+      ])
+    })
+
     it('resolves accessor computed keys in the enclosing this (audit round 7)', () => {
       const output = transpile(
         [

@@ -40,8 +40,11 @@ impl<'a> Walker<'a> {
             // `import.meta` are unaffected
             || self.inside_with(idx)
             || self.is_delete_target(idx)
-            || self.jsx_tag_violation(idx, value)
         {
+            return;
+        }
+        if self.jsx_tag_violation(idx, value) {
+            self.blanker.warn("define-jsx-tag", span);
             return;
         }
         // shorthand positions share one token for key and value: replacing
@@ -296,6 +299,11 @@ impl<'a> Walker<'a> {
                     && binary.left.span().start == start
             }
             AstKind::NewExpression(new) => new.callee.span().start == start,
+            // a call callee: `void 0?.(x)` parses as `void (0?.(x))` and
+            // loses the optional call's short-circuit; `(void 0)?.(x)` keeps
+            // it, which is how a stripper without esbuild's dead-code
+            // elimination preserves the skipped-argument behavior
+            AstKind::CallExpression(call) => call.callee.span().start == start,
             _ => false,
         }
     }
@@ -361,7 +369,9 @@ impl<'a> Walker<'a> {
                 _ => return false,
             }
         }
-        if !matches!(value.root, Some(ChainRoot::Ident(_))) {
+        // an escaped spelling (`\u0043omp`) cannot be spliced into a JSX
+        // tag at all
+        if !matches!(value.root, Some(ChainRoot::Ident(_))) || value.text.contains('\\') {
             return true;
         }
         // a bare lowercase-initial splice would flip the component to an

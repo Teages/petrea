@@ -43,10 +43,20 @@ pub struct NativeUnsupported {
     pub end: u32,
 }
 
+/// A recoverable condition surfaced to `onWarn`; a substitution was skipped
+/// or adjusted at this site.
+#[napi(object)]
+pub struct NativeWarning {
+    pub kind: String,
+    pub start: u32,
+    pub end: u32,
+}
+
 #[napi(object)]
 pub struct TranspileNativeResult {
     pub code: String,
     pub unsupported: Vec<NativeUnsupported>,
+    pub warnings: Vec<NativeWarning>,
 }
 
 /// UTF-16 variant of [`TranspileNativeResult`]: raw code units are the only
@@ -55,6 +65,18 @@ pub struct TranspileNativeResult {
 pub struct TranspileUnitsResult {
     pub code: Uint16Array,
     pub unsupported: Vec<NativeUnsupported>,
+    pub warnings: Vec<NativeWarning>,
+}
+
+fn to_napi_warnings(warnings: &[blank::blanker::Warning]) -> Vec<NativeWarning> {
+    warnings
+        .iter()
+        .map(|warning| NativeWarning {
+            kind: warning.kind.to_string(),
+            start: warning.start,
+            end: warning.end,
+        })
+        .collect()
 }
 
 fn resolve_filename(options: Option<&TranspileNativeOptions>) -> String {
@@ -90,6 +112,7 @@ fn to_napi_units_result(
                 end: report.end,
             })
             .collect(),
+        warnings: to_napi_warnings(&output.warnings),
     })
 }
 
@@ -108,6 +131,7 @@ fn to_napi_result(
                 end: report.end,
             })
             .collect(),
+        warnings: to_napi_warnings(&output.warnings),
     })
 }
 

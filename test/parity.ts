@@ -1,4 +1,4 @@
-import type { TranspileOptions, UnsupportedSyntax } from '../src/index'
+import type { TranspileOptions, UnsupportedSyntax, Warning } from '../src/index'
 import { afterAll, expect } from 'vitest'
 import { transpile as transpileAsync, transpileSync } from '../src/index'
 
@@ -27,6 +27,7 @@ export function createParity(
 
   return function transpile(input: string, options: TranspileOptions = {}): string {
     const reports: UnsupportedSyntax[] = []
+    const warnings: Warning[] = []
     let output: string
     try {
       output = transpileSync(input, {
@@ -34,6 +35,10 @@ export function createParity(
         onError: (node) => {
           reports.push(node)
           options.onError?.(node)
+        },
+        onWarn: (warning) => {
+          warnings.push(warning)
+          options.onWarn?.(warning)
         },
       })
     }
@@ -54,10 +59,14 @@ export function createParity(
 
     asyncChecks.push(async () => {
       const asyncReports: UnsupportedSyntax[] = []
+      const asyncWarnings: Warning[] = []
       const asyncOutput = await transpileAsync(input, {
         ...options,
         onError: (node) => {
           asyncReports.push(node)
+        },
+        onWarn: (warning) => {
+          asyncWarnings.push(warning)
         },
       })
       expect(
@@ -65,6 +74,7 @@ export function createParity(
         `async output for ${JSON.stringify(input.slice(0, 80))}`,
       ).toBe(output)
       expect(asyncReports).toEqual(reports)
+      expect(asyncWarnings).toEqual(warnings)
     })
 
     return output

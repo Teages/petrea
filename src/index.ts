@@ -7,7 +7,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { createApi } from './api'
 
-export type { OnError, TranspileOptions, UnsupportedSyntax } from './types'
+export type { OnError, OnWarn, TranspileOptions, UnsupportedSyntax, Warning } from './types'
 
 /** napi platform suffix for the running runtime, e.g. `darwin-arm64`. */
 function platformSuffix(): string {
