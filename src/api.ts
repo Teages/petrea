@@ -5,6 +5,8 @@ export type { OnError, TranspileOptions, UnsupportedSyntax } from './types'
 export interface NativeOptions {
   lang?: string
   filename?: string
+  /** esbuild-style defines; see `TranspileOptions.define`. */
+  define?: Record<string, string>
 }
 
 export interface NativeUnsupported {
@@ -67,6 +69,7 @@ function toNativeOptions(options: TranspileOptions): NativeOptions {
   return {
     lang: options.lang,
     filename: options.filename,
+    define: options.define && { ...options.define },
   }
 }
 
