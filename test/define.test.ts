@@ -886,6 +886,51 @@ describe('define', () => {
       ])
     })
 
+    it('guards this-rooted JSX tags and matches JSX member keys (audit round 9)', () => {
+      expect(transpile('<this.X/>', { define: { this: 'Comp' }, lang: 'tsx' as never })).toContain('<Comp.X/>')
+      const warns: string[] = []
+      const kept = transpile('<this.X/>', {
+        define: { this: '1' },
+        lang: 'tsx' as never,
+        onWarn: warning => warns.push(warning.type),
+      })
+      expect(kept).toContain('<this.X/>')
+      expect(warns).toEqual(['define-jsx-tag'])
+
+      // the JSX member chain matches dotted keys with the whole tag name
+      expect(transpile('<FLAG.X/>', { define: { 'FLAG.X': 'Comp' }, lang: 'tsx' as never })).toContain('<Comp/>')
+      expect(transpile('<FLAG.X.Y/>', { define: { 'FLAG.X.Y': 'Comp.Box' }, lang: 'tsx' as never })).toContain('<Comp.Box/>')
+      const unsafe: string[] = []
+      const literal = transpile('<FLAG.X/>', {
+        define: { 'FLAG.X': '"x"' },
+        lang: 'tsx' as never,
+        onWarn: warning => unsafe.push(warning.type),
+      })
+      expect(literal).toContain('<FLAG.X/>')
+      expect(unsafe).toEqual(['define-jsx-tag'])
+      // a whole-name splice is judged on the result shape: a bare lowercase
+      // value would flip the member tag to an intrinsic
+      const flipped: string[] = []
+      const lower = transpile('<FLAG.X/>', {
+        define: { 'FLAG.X': 'component' },
+        lang: 'tsx' as never,
+        onWarn: warning => flipped.push(warning.type),
+      })
+      expect(lower).toContain('<FLAG.X/>')
+      expect(flipped).toEqual(['define-jsx-tag'])
+    })
+
+    it('reports warning offsets in UTF-16 units (audit round 9)', () => {
+      const warnings: Array<{ start: number, end: number }> = []
+      const output = transpile('const x=\"中\"; <FLAG />', {
+        define: { FLAG: 'component' },
+        lang: 'tsx' as never,
+        onWarn: warning => warnings.push(warning),
+      })
+      expect(output).toContain('<FLAG />')
+      expect(warnings).toEqual([{ type: 'define-jsx-tag', start: 14, end: 18 }])
+    })
+
     it('resolves accessor computed keys in the enclosing this (audit round 7)', () => {
       const output = transpile(
         [

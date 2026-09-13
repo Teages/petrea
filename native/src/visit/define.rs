@@ -33,6 +33,9 @@ impl<'a> Walker<'a> {
     /// table. All guards must pass; otherwise the reference is left verbatim.
     pub(crate) fn substitute_identifier_define(&mut self, idx: u32, name: &str, span: Span) {
         let Some(defines) = self.defines else { return };
+        if self.try_jsx_member_tag_define(idx, name) {
+            return;
+        }
         let Some(value) = defines.identifier(name) else { return };
         if self.define_blocked(idx, span, value)
             || self.define_shadowed(idx, name)
@@ -75,6 +78,54 @@ impl<'a> Walker<'a> {
             .override_range_sorted(target.start, target.end, text);
     }
 
+    /// Try a dotted define over a JSX member tag (`<FLAG.X />` with the
+    /// `FLAG.X` key): JSX member tags are their own node kind, invisible to
+    /// the ordinary member-chain matcher, so the chain is collected through
+    /// the JSX wrappers and the whole tag name splices at once. Returns
+    /// true when the site was handled — matched, or skipped with a warning.
+    fn try_jsx_member_tag_define(&mut self, idx: u32, name: &str) -> bool {
+        // collect the property chain from the root outward, through JSX
+        // member expressions up to the opening/closing element
+        let mut chain: Vec<&str> = Vec::new();
+        let mut node = idx;
+        loop {
+            let parent = self.parent_of(node);
+            match self.node_kind(parent) {
+                AstKind::JSXMemberExpression(member) => {
+                    chain.push(member.property.name.as_str());
+                    node = parent;
+                }
+                AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_) => break,
+                _ => return false,
+            }
+        }
+        let Some(defines) = self.defines else { return false };
+        chain.reverse();
+        let root = ChainRoot::Ident(name.to_string());
+        let Some(value) = defines.dotted(&chain, &root) else {
+            return false;
+        };
+        // JSX safety for a whole-name splice is judged on the *result*
+        // shape: the original was a member tag, but a bare identifier value
+        // makes the result bare — where lowercase flips to an intrinsic
+        let result_flips = !value.text.contains('.')
+            && value.text.starts_with(|c: char| c.is_ascii_lowercase());
+        if !matches!(value.root, Some(ChainRoot::Ident(_)))
+            || value.text.contains('\\')
+            || result_flips
+        {
+            let span = Span::new(self.node_kind(idx).span().start, self.node_kind(node).span().end);
+            self.blanker.warn("define-jsx-tag", span);
+            return true;
+        }
+        // splice the whole tag name, root through the outermost property
+        let span = Span::new(self.node_kind(idx).span().start, self.node_kind(node).span().end);
+        self.blanker
+            .output
+            .override_range_sorted(span.start, span.end, value.text.clone());
+        true
+    }
+
     /// Substitute a bare `this` against the `this` define. Only a top-level
     /// `this` qualifies — see [`Self::this_is_nested`].
     pub(crate) fn substitute_this_define(&mut self, idx: u32, span: Span) {
@@ -83,6 +134,10 @@ impl<'a> Walker<'a> {
         if self.this_is_nested(idx)
             || self.blanker.output.overlaps_pushed_range(span.start, span.end)
         {
+            return;
+        }
+        if self.jsx_tag_violation(idx, value) {
+            self.blanker.warn("define-jsx-tag", span);
             return;
         }
         let (text, target) = self.detached(idx, span, value, self.splice_text(idx, value, span));
@@ -370,8 +425,10 @@ impl<'a> Walker<'a> {
             }
         }
         // an escaped spelling (`\u0043omp`) cannot be spliced into a JSX
-        // tag at all
-        if !matches!(value.root, Some(ChainRoot::Ident(_))) || value.text.contains('\\') {
+        // tag; `this` and `this.x` are the other valid tag spellings
+        if !matches!(value.root, Some(ChainRoot::Ident(_)) | Some(ChainRoot::This))
+            || value.text.contains('\\')
+        {
             return true;
         }
         // a bare lowercase-initial splice would flip the component to an

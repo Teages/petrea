@@ -112,6 +112,14 @@ pub fn transpile(
             ..report
         })
         .collect();
+    let warnings = warnings
+        .into_iter()
+        .map(|warning| Warning {
+            start: utf16_offset(&input, warning.start),
+            end: utf16_offset(&input, warning.end),
+            ..warning
+        })
+        .collect();
 
     Ok(TranspileOutput {
         code: output.build_owned(input),
