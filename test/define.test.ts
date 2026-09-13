@@ -976,6 +976,27 @@ describe('define', () => {
       ).toContain('return this.X')
     })
 
+    it('applies the bare this define to JSX tags inside functions (audit round 12)', () => {
+      // esbuild's JSX lowering runs ahead of its this-nesting check, so a
+      // bare `this` define reaches tags in any scope; ordinary expressions
+      // keep the barrier
+      expect(
+        transpile('function f() { return <this.X/> }', { define: { this: 'Comp' }, lang: 'tsx' as never }),
+      ).toContain('return <Comp.X/>')
+      expect(
+        transpile('class C { f = <this.X/> }', { define: { this: 'Comp' }, lang: 'tsx' as never }),
+      ).toContain('<Comp.X/>')
+      expect(
+        transpile('function f() { return <this/> }', { define: { this: 'Comp' }, lang: 'tsx' as never }),
+      ).toContain('return <Comp/>')
+      expect(
+        transpile('function f() { return this.X }', { define: { this: 'Comp' } }),
+      ).toContain('return this.X')
+      expect(transpile('function f() { return this }', { define: { this: 'Comp' } })).toContain(
+        'return this',
+      )
+    })
+
     it('reports warning offsets in UTF-16 units (audit round 9)', () => {
       const warnings: Array<{ start: number, end: number }> = []
       const output = transpile('const x=\"中\"; <FLAG />', {

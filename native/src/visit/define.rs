@@ -152,7 +152,11 @@ impl<'a> Walker<'a> {
             return;
         }
         let Some(value) = defines.this() else { return };
-        if self.this_is_nested(idx)
+        // a JSX tag position drops the nested-`this` barrier — esbuild's
+        // JSX lowering runs ahead of its this-nesting check; ordinary
+        // expressions keep it
+        let in_jsx_tag = self.jsx_tag_position(idx).is_some();
+        if (!in_jsx_tag && self.this_is_nested(idx))
             || self.blanker.output.overlaps_pushed_range(span.start, span.end)
         {
             return;
@@ -422,15 +426,9 @@ impl<'a> Walker<'a> {
             || (self.is_write_target(idx) && !value.assignable)
     }
 
-    /// Whether splicing this value at a JSX tag position would be wrong.
-    /// petrea keeps JSX text (esbuild lowers tags into createElement
-    /// arguments and can splice anything): literals cannot be tags at all
-    /// (`<"x" />` is invalid, `<true />` silently the string tag), and a
-    /// bare identifier splice starting lowercase would flip the component
-    /// reference to an intrinsic string tag (`<component />`). A member-tag
-    /// root (`<FLAG.X />`) and dotted splices (`<Comp.Box />`) are
-    /// references regardless of case.
-    fn jsx_tag_violation(&self, idx: u32, value: &DefineValue) -> bool {
+    /// Whether the reference sits in a JSX tag position, and whether the
+    /// tag is a member expression rooted at it; `None` outside tags.
+    fn jsx_tag_position(&self, idx: u32) -> Option<bool> {
         let mut top = idx;
         let mut member_root = false;
         loop {
@@ -441,10 +439,27 @@ impl<'a> Walker<'a> {
                     member_root = true;
                     top = self.parent_of(top);
                 }
-                AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_) => break,
-                _ => return false,
+                AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_) => {
+                    return Some(member_root)
+                }
+                _ => return None,
             }
         }
+    }
+
+    /// Whether splicing this value at a JSX tag position would be wrong.
+    /// petrea keeps JSX text (esbuild lowers tags into createElement
+    /// arguments and can splice anything): literals cannot be tags at all
+    /// (`<"x" />` is invalid, `<true />` silently the string tag), and a
+    /// bare identifier splice starting lowercase would flip the component
+    /// reference to an intrinsic string tag (`<component />`). A member-tag
+    /// root (`<FLAG.X />`) and dotted splices (`<Comp.Box />`) are
+    /// references regardless of case.
+    fn jsx_tag_violation(&self, idx: u32, value: &DefineValue) -> bool {
+        // `None` outside tag positions reads as "no violation"
+        let Some(member_root) = self.jsx_tag_position(idx) else {
+            return false;
+        };
         // an escaped spelling (`\u0043omp`) cannot be spliced into a JSX
         // tag; `this` and `this.x` are the other valid tag spellings
         if !matches!(value.root, Some(ChainRoot::Ident(_)) | Some(ChainRoot::This))
