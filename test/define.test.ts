@@ -937,14 +937,15 @@ describe('define', () => {
       // the longest matching prefix wins: FLAG.X under FLAG.X.Y keeps .Y
       expect(transpile('<FLAG.X.Y/>', { define: { 'FLAG.X': 'Comp' }, lang: 'tsx' as never })).toContain('<Comp.Y/>')
 
-      // this-rooted tags match their own keys, still nested-this aware
+      // this-rooted tags match their own keys — inside functions too,
+      // per esbuild (audit round 11 dropped the tag this-barrier)
       expect(transpile('<this.X/>', { define: { 'this.X': 'Comp' }, lang: 'tsx' as never })).toContain('<Comp/>')
       expect(
         transpile('function f() { return <this.X/> }', {
           define: { 'this.X': 'Comp' },
           lang: 'tsx' as never,
         }),
-      ).toContain('<this.X/>')
+      ).toContain('return <Comp/>')
     })
 
     it('judges JSX prefix splices on the full tag, and drops the tag this-barrier (audit round 11)', () => {
