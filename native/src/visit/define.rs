@@ -40,11 +40,7 @@ impl<'a> Walker<'a> {
             // `import.meta` are unaffected
             || self.inside_with(idx)
             || self.is_delete_target(idx)
-            // a JSX tag position takes only identifier-shaped splices —
-            // petrea keeps JSX text, where `<"x" />` is invalid and
-            // `<true />` silently means the string tag (esbuild replaces
-            // freely because it lowers tags to createElement arguments)
-            || (self.is_jsx_tag(idx) && !matches!(value.root, Some(ChainRoot::Ident(_))))
+            || self.jsx_tag_violation(idx, value)
         {
             return;
         }
@@ -342,14 +338,38 @@ impl<'a> Walker<'a> {
             || (self.is_write_target(idx) && !value.assignable)
     }
 
-    /// Whether the reference is a JSX element tag — the identifier child of
-    /// an opening/closing element (attribute values live under their own
-    /// container kinds and are ordinary expressions).
-    fn is_jsx_tag(&self, idx: u32) -> bool {
-        matches!(
-            self.node_kind(self.parent_of(idx)),
-            AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_)
-        )
+    /// Whether splicing this value at a JSX tag position would be wrong.
+    /// petrea keeps JSX text (esbuild lowers tags into createElement
+    /// arguments and can splice anything): literals cannot be tags at all
+    /// (`<"x" />` is invalid, `<true />` silently the string tag), and a
+    /// bare identifier splice starting lowercase would flip the component
+    /// reference to an intrinsic string tag (`<component />`). A member-tag
+    /// root (`<FLAG.X />`) and dotted splices (`<Comp.Box />`) are
+    /// references regardless of case.
+    fn jsx_tag_violation(&self, idx: u32, value: &DefineValue) -> bool {
+        let mut top = idx;
+        let mut member_root = false;
+        loop {
+            match self.node_kind(self.parent_of(top)) {
+                // the object of a JSX member tag — its property is a name,
+                // not a reference, so any reference child is the object
+                AstKind::JSXMemberExpression(_) => {
+                    member_root = true;
+                    top = self.parent_of(top);
+                }
+                AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_) => break,
+                _ => return false,
+            }
+        }
+        if !matches!(value.root, Some(ChainRoot::Ident(_))) {
+            return true;
+        }
+        // a bare lowercase-initial splice would flip the component to an
+        // intrinsic string tag; a member-tag root or a dotted splice is a
+        // reference regardless of case
+        !member_root
+            && !value.text.contains('.')
+            && value.text.starts_with(|c: char| c.is_ascii_lowercase())
     }
 
     /// Whether the reference is deleted as a bare identifier — `delete
@@ -447,7 +467,17 @@ impl<'a> Walker<'a> {
             }
             match self.node_kind(parent) {
                 AstKind::Function(_) | AstKind::StaticBlock(_) => return true,
-                AstKind::AccessorProperty(_) => return true,
+                AstKind::AccessorProperty(node) => {
+                    // same rule as fields: an initializer gets the instance
+                    // `this`, a computed key evaluates in the enclosing one
+                    let key = node.key.span();
+                    let span = self.node_kind(idx).span();
+                    if span.start >= key.start && span.end <= key.end {
+                        idx = parent;
+                        continue;
+                    }
+                    return true;
+                }
                 AstKind::PropertyDefinition(node) => {
                     // an initializer gets the instance `this`; a computed key
                     // evaluates in the enclosing `this`, which may itself be

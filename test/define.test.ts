@@ -833,6 +833,40 @@ describe('define', () => {
       }
     })
 
+    it('guards JSX tag case and member-tag roots (audit round 7)', () => {
+      // a bare lowercase splice would flip the component to an intrinsic
+      // string tag; esbuild passes the variable because it lowers tags to
+      // createElement arguments
+      expect(transpile('<FLAG />', { define: { FLAG: 'component' }, lang: 'tsx' as never })).toContain('<FLAG />')
+      expect(transpile('<FLAG />', { define: { FLAG: 'Component' }, lang: 'tsx' as never })).toContain('<Component />')
+      expect(transpile('<FLAG />', { define: { FLAG: 'Comp.Box' }, lang: 'tsx' as never })).toContain('<Comp.Box />')
+      expect(transpile('<FLAG />', { define: { FLAG: '_C' }, lang: 'tsx' as never })).toContain('<_C />')
+      // member-tag roots are references regardless of case; literals stay out
+      expect(transpile('<FLAG.X />', { define: { FLAG: 'component' }, lang: 'tsx' as never })).toContain('<component.X />')
+      expect(transpile('<FLAG.X />', { define: { FLAG: '"x"' }, lang: 'tsx' as never })).toContain('<FLAG.X />')
+      expect(transpile('<FLAG.X />', { define: { FLAG: 'undefined' }, lang: 'tsx' as never })).toContain('<FLAG.X />')
+      expect(transpile('<FLAG.X />', { define: { FLAG: 'Comp' }, lang: 'tsx' as never })).toContain('<Comp.X />')
+    })
+
+    it('resolves accessor computed keys in the enclosing this (audit round 7)', () => {
+      const output = transpile(
+        [
+          'class C { accessor [this.foo] = 1 }',
+          'class D { accessor x = this.foo }',
+          'function f() { return class { accessor [this.x] = 1 } }',
+        ].join('\n'),
+        { define: { 'this.foo': '"defined"', 'this.x': '"w"' } },
+      )
+      expect(output).toContain('accessor [\"defined\"] = 1')
+      expect(output).toContain('accessor x = this.foo')
+      expect(output).toContain('accessor [this.x] = 1')
+      expect(output).toMatchInlineSnapshot(`
+        "class C { accessor ["defined"] = 1 }
+        class D { accessor x = this.foo }
+        function f() { return class { accessor [this.x] = 1 } }"
+      `)
+    })
+
     it('replaces destructuring defaults, which are read positions (audit round 6)', () => {
       const output = transpile(['[x=FLAG]=[]', '({x=FLAG}={})', '({x:y=FLAG}={})'].join('\n'), {
         define: { FLAG: '1' },
