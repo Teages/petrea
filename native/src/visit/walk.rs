@@ -744,6 +744,17 @@ impl<'a> Walker<'a> {
                 }
             }
 
+            // bare `this` / `import.meta` may carry their own defines
+            AstKind::ThisExpression(n) => {
+                self.substitute_this_define(idx, n.span());
+                VisitResult::Js
+            }
+
+            AstKind::ImportMeta(n) => {
+                self.substitute_import_meta_define(idx, n.span());
+                VisitResult::Js
+            }
+
             AstKind::ImportDeclaration(n) => statement::visit_import_declaration(self, n),
 
             AstKind::ExportAllDeclaration(n) => {

@@ -1,11 +1,14 @@
 //! esbuild-style defines: compile-time replacement of global references.
-//! Keys are dot-separated identifier paths; values are the source text of a
+//! Keys are identifier-rooted member paths — `__DEV__`, `process.env.NODE_ENV`,
+//! `x.y["z!"]`, with `this` and `import.meta` as alternate roots — parsed with
+//! the oxc expression parser so spelling, keywords-as-properties and string
+//! escapes are validated exactly like source. Values are the source text of a
 //! primitive literal (`true`, `42`, `'"production"'`, `123n`, `null`) or an
-//! entity name (`DEBUG`, `undefined`, `other.global`) spliced verbatim — the
-//! same shape restriction esbuild applies, which is what makes a bare textual
-//! splice safe in every expression position. Values referencing other defines
-//! are never re-resolved (esbuild resolves one level; splicing is simpler and
-//! equally predictable).
+//! entity name (`DEBUG`, `undefined`, `other.global`, `this`, `import.meta`)
+//! spliced verbatim — the same shape restriction esbuild applies, which is
+//! what makes a bare textual splice safe in every expression position. Values
+//! referencing other defines are never re-resolved (esbuild resolves one
+//! level; splicing is simpler and equally predictable).
 
 use std::collections::HashMap;
 
@@ -13,21 +16,40 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::Expression;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
-use oxc_syntax::identifier::is_identifier_name;
-use oxc_syntax::keyword::is_reserved_keyword;
 
-/// One validated replacement: the splice text (user spelling, trimmed) and
-/// the two behavioral flags the walk guards on.
+/// The root of a define key (and of a member chain matched against it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ChainRoot {
+    /// a bare identifier, subject to scope shadowing
+    Ident(String),
+    /// `this`, only meaningful at a function's top level
+    This,
+    /// `import.meta`
+    ImportMeta,
+}
+
+/// One validated replacement: the splice text (user spelling, trimmed) plus
+/// the root of an entity value — `None` for literals.
 pub(crate) struct DefineValue {
     pub(crate) text: String,
     /// a `NumericLiteral` — must not fuse with a following `.` member
     /// (`42.x` would lex as `42.` + `x`), so a space is appended
     pub(crate) numeric: bool,
-    /// `Some(root)` for an entity name (identifier or dotted chain), where
-    /// `root` is its first segment: the only value shape allowed where the
-    /// reference is a write target (`flag = 1` → `DEBUG = 1`), and the name a
-    /// splice may have to qualify through an enum member scope
-    pub(crate) root: Option<String>,
+    /// entity values carry their root; an identifier root may need
+    /// qualification through an enum member scope
+    pub(crate) root: Option<ChainRoot>,
+    /// whether a write target may take this value: identifiers and dotted
+    /// chains yes (`DEBUG = x`, `this.foo = x`), literals and bare `this`/
+    /// `import.meta` no — mirroring esbuild's identifier-or-dot rule
+    pub(crate) assignable: bool,
+}
+
+/// A multi-segment key, matched by its full root + segment list.
+struct DotEntry {
+    root: ChainRoot,
+    /// segments after the root, in key order (the outermost property last)
+    segments: Vec<String>,
+    index: u32,
 }
 
 /// The lookup tables, mirroring esbuild's split: single-segment keys replace
@@ -36,7 +58,9 @@ pub(crate) struct DefineValue {
 #[derive(Default)]
 pub(crate) struct Defines {
     identifiers: HashMap<String, u32>,
-    dotted: HashMap<String, Vec<(Vec<String>, u32)>>,
+    dotted: HashMap<String, Vec<DotEntry>>,
+    this_define: Option<u32>,
+    import_meta_define: Option<u32>,
     values: Vec<DefineValue>,
 }
 
@@ -50,28 +74,37 @@ impl Defines {
         self.identifiers.get(name).map(|&i| &self.values[i as usize])
     }
 
+    pub(crate) fn this(&self) -> Option<&DefineValue> {
+        self.this_define.map(|i| &self.values[i as usize])
+    }
+
+    pub(crate) fn import_meta(&self) -> Option<&DefineValue> {
+        self.import_meta_define.map(|i| &self.values[i as usize])
+    }
+
     /// The value a member chain maps to. `chain` holds the property names
-    /// from the outermost member inward (tail first); `root` is the chain's
-    /// root identifier name. Matching is exact over the whole key.
-    pub(crate) fn dotted(&self, chain: &[&str], root: &str) -> Option<&DefineValue> {
+    /// from the outermost member inward (tail first); matching is exact over
+    /// the whole key, root included. Keys written with `["string"]` segments
+    /// match chains spelled either way — only the decoded segment values
+    /// matter.
+    pub(crate) fn dotted(&self, chain: &[&str], root: &ChainRoot) -> Option<&DefineValue> {
         let head = chain.first()?;
         self.dotted
             .get(*head)
             .and_then(|entries| {
-                entries.iter().find(|(parts, _)| {
-                    // the key's final segment is the outermost property; the
-                    // first is the root identifier, compared by name
-                    parts.len() == chain.len() + 1
-                        && parts[0] == root
-                        && parts.iter().rev().zip(chain).all(|(p, c)| p == c)
+                entries.iter().find(|entry| {
+                    entry.segments.len() == chain.len()
+                        && entry.root == *root
+                        && entry.segments.iter().rev().zip(chain).all(|(s, c)| s == c)
                 })
             })
-            .map(|&(_, i)| &self.values[i as usize])
+            .map(|entry| &self.values[entry.index as usize])
     }
 
-    /// Validate every key and value, rejecting anything the splice machinery
-    /// cannot honor. `this`/`import.meta` roots are rejected up front: their
-    /// replacement rules differ between module kinds and are not supported.
+    /// Parse and validate every key and value. Keys and values both go
+    /// through the expression parser, so anything the splice machinery
+    /// cannot honor — operators, calls, objects, malformed paths — is
+    /// rejected with the parser's own diagnostics.
     pub(crate) fn new(
         entries: &HashMap<String, String>,
         allocator: &Allocator,
@@ -83,93 +116,120 @@ impl Defines {
         let mut defines = Self::default();
         for key in keys {
             let value = &entries[key];
-            let parts = validate_key(key)?;
-            let value = validate_value(value, allocator)
+            let (root, segments) = parse_key(key, allocator)
+                .map_err(|error| format!("invalid define key {key:?}: {error}"))?;
+            let value = parse_value(value, allocator)
                 .map_err(|error| format!("invalid define value for {key:?}: {error}"))?;
             let index = defines.values.len() as u32;
             defines.values.push(value);
-            if let [name] = &parts[..] {
-                defines.identifiers.insert(name.clone(), index);
-            } else {
-                let tail = parts.last().expect("at least one segment").clone();
-                defines.dotted.entry(tail).or_default().push((parts, index));
+            match (&root, segments.as_slice()) {
+                (ChainRoot::Ident(name), []) => {
+                    defines.identifiers.insert(name.clone(), index);
+                }
+                (ChainRoot::This, []) => defines.this_define = Some(index),
+                (ChainRoot::ImportMeta, []) => defines.import_meta_define = Some(index),
+                _ => {
+                    let tail = segments.last().expect("at least one segment").clone();
+                    defines.dotted.entry(tail).or_default().push(DotEntry {
+                        root,
+                        segments,
+                        index,
+                    });
+                }
             }
         }
         Ok(defines)
     }
 }
 
-/// Split a key into identifier segments. Later segments may be keywords (they
-/// occupy `IdentifierName` property positions); the first may not — reserved
-/// words cannot be referenced, and `this`/`import` roots are unsupported.
-fn validate_key(key: &str) -> Result<Vec<String>, String> {
-    if key.is_empty() {
-        return Err("invalid define key \"\": must be a dotted identifier path".to_string());
-    }
-    let parts: Vec<String> = key.split('.').map(str::to_string).collect();
-    for (position, part) in parts.iter().enumerate() {
-        if !is_identifier_name(part) {
-            return Err(format!("invalid define key {key:?}: segment {part:?} is not an identifier"));
+/// Parse one key as a member expression and split it into root + segments.
+/// `a.b["c!"]` → (`a`, [`b`, `c!`]); `this.x` / `import.meta.x` accept their
+/// special roots; keywords are valid in property positions but not as the
+/// root identifier (the parser rejects reserved words there).
+fn parse_key(key: &str, allocator: &Allocator) -> Result<(ChainRoot, Vec<String>), String> {
+    let shape = "must be a dotted identifier path".to_string();
+    let parsed = Parser::new(allocator, key, SourceType::mjs().with_module(true))
+        .parse_expression()
+        .map_err(|_| shape.clone())?;
+    // collected from the outermost member inward, then reversed into key order
+    let mut segments: Vec<String> = Vec::new();
+    let mut expression = &parsed;
+    let root = loop {
+        match expression {
+            Expression::Identifier(reference) => {
+                break ChainRoot::Ident(reference.name.as_str().to_string());
+            }
+            Expression::ThisExpression(_) => break ChainRoot::This,
+            Expression::ImportMeta(_) => break ChainRoot::ImportMeta,
+            Expression::StaticMemberExpression(member) => {
+                segments.push(member.property.name.as_str().to_string());
+                expression = &member.object;
+            }
+            Expression::ComputedMemberExpression(member) => {
+                let Expression::StringLiteral(literal) = &member.expression else {
+                    return Err(shape);
+                };
+                segments.push(literal.value.as_str().to_string());
+                expression = &member.object;
+            }
+            _ => return Err(shape),
         }
-        if position == 0
-            && (is_reserved_keyword(part) || matches!(part.as_str(), "this" | "import"))
-        {
-            return Err(format!(
-                "invalid define key {key:?}: the root segment {part:?} cannot be defined"
-            ));
-        }
-    }
-    Ok(parts)
+    };
+    segments.reverse();
+    Ok((root, segments))
 }
 
 /// Parse the value as one expression and accept only the two splice-safe
-/// shapes: a primitive literal, or an identifier-rooted dot chain. Anything
-/// else — operators, calls, objects, templates — is rejected rather than
-/// spliced (precedence would not survive a bare textual replacement).
-fn validate_value(value: &str, allocator: &Allocator) -> Result<DefineValue, String> {
+/// shapes: a primitive literal, or an entity chain rooted at an identifier,
+/// `this` or `import.meta`. Anything else — operators, calls, objects,
+/// templates — is rejected rather than spliced (precedence would not survive
+/// a bare textual replacement).
+fn parse_value(value: &str, allocator: &Allocator) -> Result<DefineValue, String> {
+    let invalid = "must be a primitive literal or an entity name".to_string();
     let trimmed = value.trim();
-    let source_type = SourceType::mjs().with_module(true);
-    let parsed = Parser::new(allocator, trimmed, source_type).parse_expression();
-    let expression = parsed.map_err(|_| {
-        "must be a primitive literal or an entity name".to_string()
-    })?;
-    match &expression {
+    let parsed = Parser::new(allocator, trimmed, SourceType::mjs().with_module(true))
+        .parse_expression()
+        .map_err(|_| invalid.clone())?;
+    let numeric = matches!(parsed, Expression::NumericLiteral(_));
+    let root = entity_root(&parsed).ok_or_else(|| invalid.clone())?;
+    // identifiers and dotted chains are assignable; bare `this`/`import.meta`
+    // and literals are not
+    let assignable = root.is_some()
+        && (matches!(root, Some(ChainRoot::Ident(_))) || chain_depth(&parsed) > 0);
+    Ok(DefineValue {
+        text: trimmed.to_string(),
+        numeric,
+        root,
+        assignable,
+    })
+}
+
+/// The entity root of an expression chain, or `None` for non-literals —
+/// literals carry no root, chains must bottom out at an identifier, `this`
+/// or `import.meta`.
+fn entity_root(expression: &Expression<'_>) -> Option<Option<ChainRoot>> {
+    match expression {
         Expression::BooleanLiteral(_)
         | Expression::NullLiteral(_)
         | Expression::StringLiteral(_)
-        | Expression::BigIntLiteral(_) => Ok(DefineValue {
-            text: trimmed.to_string(),
-            numeric: false,
-            root: None,
-        }),
-        Expression::NumericLiteral(_) => Ok(DefineValue {
-            text: trimmed.to_string(),
-            numeric: true,
-            root: None,
-        }),
-        Expression::Identifier(_) | Expression::StaticMemberExpression(_)
-            if is_entity_chain(&expression) =>
-        {
-            let root = trimmed.split('.').next().unwrap_or(trimmed).to_string();
-            Ok(DefineValue {
-                text: trimmed.to_string(),
-                numeric: false,
-                root: Some(root),
-            })
+        | Expression::BigIntLiteral(_)
+        | Expression::NumericLiteral(_) => Some(None),
+        Expression::Identifier(reference) => {
+            Some(Some(ChainRoot::Ident(reference.name.as_str().to_string())))
         }
-        _ => Err("must be a primitive literal or an entity name".to_string()),
+        Expression::ThisExpression(_) => Some(Some(ChainRoot::This)),
+        Expression::ImportMeta(_) => Some(Some(ChainRoot::ImportMeta)),
+        Expression::StaticMemberExpression(member) => entity_root(&member.object),
+        _ => None,
     }
 }
 
-/// A dot chain of identifiers rooted at a bare identifier reference
-/// (`foo.bar.baz`); keywords are valid in property positions.
-fn is_entity_chain(expression: &Expression<'_>) -> bool {
+/// How many property accesses the expression chain carries above its root.
+fn chain_depth(expression: &Expression<'_>) -> u32 {
     match expression {
-        Expression::Identifier(_) => true,
-        Expression::StaticMemberExpression(member) => {
-            is_entity_chain(&member.object)
-        }
-        _ => false,
+        Expression::StaticMemberExpression(member) => 1 + chain_depth(&member.object),
+        Expression::ComputedMemberExpression(member) => 1 + chain_depth(&member.object),
+        _ => 0,
     }
 }
 
@@ -198,26 +258,48 @@ mod tests {
             ("g", "DEBUG"),
             ("h", "undefined"),
             ("i.j.k", "'x'"),
-            ("i_value", "other.global"),
             ("k.class", "1"),
+            ("this", "1"),
+            ("this.foo", "2"),
+            ("import.meta", "1"),
+            ("import.meta.env.MODE", "'dev'"),
+            ("x.y[\"z!\"]", "true"),
+            ("x[\"y\"].z", "true"),
+            ("v", "this"),
+            ("w", "this.foo"),
+            ("u", "import.meta.url"),
         ])
         .unwrap();
         assert_eq!(defines.identifier("a").unwrap().text, "true");
         assert!(defines.identifier("c").unwrap().numeric);
-        assert_eq!(defines.identifier("g").unwrap().root.as_deref(), Some("DEBUG"));
-        assert_eq!(defines.identifier("i_value").unwrap().root.as_deref(), Some("other"));
-        assert!(defines.dotted(&["k", "j"], "i").is_some());
-        assert!(defines.dotted(&["class"], "k").is_some());
-        assert!(defines.dotted(&["j"], "i").is_none());
-        assert!(defines.dotted(&["k", "j"], "x").is_none());
+        assert_eq!(
+            defines.identifier("g").unwrap().root,
+            Some(ChainRoot::Ident("DEBUG".to_string()))
+        );
+        assert!(defines.this().is_some());
+        assert!(defines.import_meta().is_some());
+        assert_eq!(defines.identifier("v").unwrap().root, Some(ChainRoot::This));
+        assert!(!defines.identifier("v").unwrap().assignable);
+        assert!(defines.identifier("w").unwrap().assignable);
+        assert!(defines.identifier("g").unwrap().assignable);
+        assert!(!defines.identifier("c").unwrap().assignable);
+        assert!(defines.dotted(&["k", "j"], &ChainRoot::Ident("i".into())).is_some());
+        assert!(defines.dotted(&["class"], &ChainRoot::Ident("k".into())).is_some());
+        assert!(defines.dotted(&["MODE", "env"], &ChainRoot::ImportMeta).is_some());
+        assert!(defines.dotted(&["j"], &ChainRoot::Ident("i".into())).is_none());
+        assert!(defines.dotted(&["k", "j"], &ChainRoot::This).is_none());
+        // a bracket-spelled key matches a dot-spelled chain and vice versa
+        let bracket = build(&[("x.y[\"z\"]", "true")]).unwrap();
+        assert!(bracket.dotted(&["z", "y"], &ChainRoot::Ident("x".into())).is_some());
+        assert!(bracket.dotted(&["z"], &ChainRoot::Ident("x".into())).is_none());
     }
 
     #[test]
     fn rejects_bad_keys_and_values() {
-        for key in ["", "a..b", "a b", "this.x", "import.meta.env", "await", "3x"] {
+        for key in ["", "a..b", "a b", "import", "import.env", "await", "3x", "x[y]", "a[0]"] {
             assert!(build(&[(key, "1")]).is_err(), "key {key:?} should be rejected");
         }
-        for value in ["", "1 + 2", "foo()", "{ a: 1 }", "`t${x}`", "this", "-1", "!0"] {
+        for value in ["", "1 + 2", "foo()", "{ a: 1 }", "`t${x}`", "-1", "!0", "[1, 2]"] {
             assert!(build(&[("x", value)]).is_err(), "value {value:?} should be rejected");
         }
     }

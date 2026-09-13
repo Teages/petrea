@@ -1,19 +1,21 @@
-//! Define substitution during the main walk: bare identifiers and member
-//! chains that match a define key are spliced over with the value text, in
-//! source order, interleaving with the erasure blanks like enum rewrites do.
+//! Define substitution during the main walk: bare identifiers, `this`,
+//! `import.meta` and member chains that match a define key are spliced over
+//! with the value text, in source order, interleaving with the erasure
+//! blanks like enum rewrites do.
 //!
-//! Guards mirror esbuild's verified behavior: only *unbound* references are
-//! replaced (any binding — a parameter, `var`, import, function/class/enum/
-//! namespace name — shadows the key, resolved through the same scope model
-//! the enum pipeline registers), write targets only take entity values, and
-//! already-blanked/overridden regions are never spliced into. `this`/
-//! `import.meta` roots are rejected at validation and never reach here.
+//! Guards mirror esbuild's verified behavior: identifier references resolve
+//! through the enum pipeline's scope registry (a parameter, `var`, import,
+//! function/class/enum/namespace name shadows the key), `this` keys replace
+//! only a top-level `this` (one outside any function and class member —
+//! arrows inherit it), write targets take only assignable entity values,
+//! and already-blanked/overridden regions are never spliced into.
 
 use oxc_ast::AstKind;
 use oxc_ast::ast::Expression;
 use oxc_span::GetSpan;
 use oxc_span::Span;
 
+use crate::defines::ChainRoot;
 use crate::defines::DefineValue;
 use crate::visit::enums::model::scope_above;
 use crate::visit::walk::Walker;
@@ -21,12 +23,7 @@ use crate::visit::walk::Walker;
 impl<'a> Walker<'a> {
     /// Substitute one identifier reference against the single-segment define
     /// table. All guards must pass; otherwise the reference is left verbatim.
-    pub(crate) fn substitute_identifier_define(
-        &mut self,
-        idx: u32,
-        name: &str,
-        span: Span,
-    ) {
+    pub(crate) fn substitute_identifier_define(&mut self, idx: u32, name: &str, span: Span) {
         let Some(defines) = self.defines else { return };
         let Some(value) = defines.identifier(name) else { return };
         if self.define_blocked(idx, span, value) || self.define_shadowed(idx, name) {
@@ -47,14 +44,40 @@ impl<'a> Walker<'a> {
         self.blanker.output.override_range_sorted(span.start, span.end, text);
     }
 
+    /// Substitute a bare `this` against the `this` define. Only a top-level
+    /// `this` qualifies — see [`Self::this_is_nested`].
+    pub(crate) fn substitute_this_define(&mut self, idx: u32, span: Span) {
+        let Some(defines) = self.defines else { return };
+        let Some(value) = defines.this() else { return };
+        if self.this_is_nested(idx)
+            || self.blanker.output.overlaps_pushed_range(span.start, span.end)
+        {
+            return;
+        }
+        let text = self.splice_text(idx, value, span);
+        self.blanker.output.override_range_sorted(span.start, span.end, text);
+    }
+
+    /// Substitute a bare `import.meta` against the `import.meta` define.
+    pub(crate) fn substitute_import_meta_define(&mut self, idx: u32, span: Span) {
+        let Some(defines) = self.defines else { return };
+        let Some(value) = defines.import_meta() else { return };
+        if self.blanker.output.overlaps_pushed_range(span.start, span.end) {
+            return;
+        }
+        let text = self.splice_text(idx, value, span);
+        self.blanker.output.override_range_sorted(span.start, span.end, text);
+    }
+
     /// Try to substitute the member chain rooted at member node `idx`.
     /// Returns true when the chain matched and was spliced (the caller must
     /// then skip the subtree); false leaves the generic child walk in charge,
-    /// which retries the shorter suffix chains and the root identifier.
+    /// which retries the shorter suffix chains and the chain's root.
     pub(crate) fn substitute_member_define(&mut self, idx: u32) -> bool {
         let Some(defines) = self.defines else { return false };
         // property names from the outermost member inward; the root lands in
-        // `node` and must be a bare, unbound identifier reference
+        // `node` and must be a bare identifier reference, `this` (top level
+        // only) or `import.meta`
         let mut chain: Vec<&str> = Vec::new();
         let mut node = idx;
         let root;
@@ -72,16 +95,31 @@ impl<'a> Walker<'a> {
                     node = node_index_of(&member.object);
                 }
                 AstKind::IdentifierReference(reference) => {
-                    root = (node, reference.name.as_str());
+                    root = (node, ChainRoot::Ident(reference.name.as_str().to_string()));
+                    break;
+                }
+                AstKind::ThisExpression(_) => {
+                    root = (node, ChainRoot::This);
+                    break;
+                }
+                AstKind::ImportMeta(_) => {
+                    root = (node, ChainRoot::ImportMeta);
                     break;
                 }
                 _ => return false,
             }
         }
-        let (root_idx, root_name) = root;
-        let Some(value) = defines.dotted(&chain, root_name) else { return false };
+        let (root_idx, ref root_kind) = root;
+        let Some(value) = defines.dotted(&chain, root_kind) else { return false };
         let span = self.node_kind(idx).span();
-        if self.define_blocked(idx, span, value) || self.define_shadowed(root_idx, root_name) {
+        // identifier roots resolve through the scope model; a `this` root
+        // only exists at top level
+        let root_blocked = match root_kind {
+            ChainRoot::Ident(name) => self.define_shadowed(root_idx, name),
+            ChainRoot::This => self.this_is_nested(root_idx),
+            ChainRoot::ImportMeta => false,
+        };
+        if root_blocked || self.define_blocked(idx, span, value) {
             return false;
         }
         let text = self.splice_text(idx, value, span);
@@ -89,16 +127,15 @@ impl<'a> Walker<'a> {
         true
     }
 
-    /// The guards shared by both substitution paths. Shadowing is checked by
-    /// the callers — the identifier path resolves its own name, the member
-    /// path resolves the chain's root identifier.
+    /// The guards shared by the identifier and member substitution paths.
     fn define_blocked(&self, idx: u32, span: Span, value: &DefineValue) -> bool {
         // the erasure pass may have blanked this region (a type position the
         // flattener could not prune); splicing text back in would corrupt it
         self.blanker.output.overlaps_pushed_range(span.start, span.end)
-            // a literal cannot be written through (`42 = x` is a syntax
-            // error); entity values may (`DEBUG = x` writes the global)
-            || (self.is_write_target(idx) && value.root.is_none())
+            // a literal (or a bare `this`/`import.meta` value) cannot be
+            // written through (`42 = x` is a syntax error); entity values
+            // may (`DEBUG = x` writes the global)
+            || (self.is_write_target(idx) && !value.assignable)
     }
 
     /// Whether the node at `idx` is the target of an assignment, update or
@@ -142,6 +179,31 @@ impl<'a> Walker<'a> {
         !matches!(self.name_binding(idx, name), NameBinding::Global)
     }
 
+    /// Whether a `this` expression sits in a position with its own `this`
+    /// binding: inside a non-arrow function (parameters, defaults and body —
+    /// arrows inherit the outer `this` and pass through), a static block, or
+    /// a class field initializer. Class member *computed keys* evaluate in
+    /// the enclosing `this` and stay top-level, per spec.
+    fn this_is_nested(&self, mut idx: u32) -> bool {
+        loop {
+            let parent = self.parent_of(idx);
+            if parent == u32::MAX {
+                return false;
+            }
+            match self.node_kind(parent) {
+                AstKind::Function(_) | AstKind::StaticBlock(_) => return true,
+                AstKind::PropertyDefinition(node) => {
+                    // computed keys belong to the enclosing this
+                    let key = node.key.span();
+                    let span = self.node_kind(idx).span();
+                    return !(span.start >= key.start && span.end <= key.end);
+                }
+                _ => {}
+            }
+            idx = parent;
+        }
+    }
+
     /// The splice text for a matched span: the value as written — except an
     /// entity root captured by an enum member scope, which is qualified
     /// `Enum.root` (members live on the enum object, not in lexical scope —
@@ -150,11 +212,11 @@ impl<'a> Walker<'a> {
     /// (`42.x` would lex as `42.` + `x`).
     fn splice_text(&self, idx: u32, value: &DefineValue, span: Span) -> String {
         let mut text = match &value.root {
-            Some(root) => match self.name_binding(idx, root) {
+            Some(ChainRoot::Ident(root)) => match self.name_binding(idx, root) {
                 NameBinding::EnumMember(enum_name) => format!("{enum_name}.{}", value.text),
                 _ => value.text.clone(),
             },
-            None => value.text.clone(),
+            _ => value.text.clone(),
         };
         if value.numeric && self.src.as_bytes().get(span.end as usize) == Some(&b'.') {
             text.push(' ');
