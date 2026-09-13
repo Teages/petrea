@@ -920,6 +920,33 @@ describe('define', () => {
       expect(flipped).toEqual(['define-jsx-tag'])
     })
 
+    it('resolves scope and prefixes in JSX member tags (audit round 10)', () => {
+      // shadowed roots stay, exactly like ordinary references
+      const shadowed = transpile(
+        ['function f(FLAG) { return <FLAG.X/> }', 'const FLAG = 1; <FLAG.X/>', 'with(o) { <FLAG.X/> }'].join('\n'),
+        { define: { 'FLAG.X': 'Comp' }, lang: 'tsx' as never },
+      )
+      expect(shadowed).toContain('return <FLAG.X/>')
+      expect(shadowed.match(/<FLAG.X\/>/g)).toHaveLength(3)
+      expect(shadowed).toMatchInlineSnapshot(`
+        "function f(FLAG) { return <FLAG.X/> }
+        const FLAG = 1; <FLAG.X/>
+        with(o) { <FLAG.X/> }"
+      `)
+
+      // the longest matching prefix wins: FLAG.X under FLAG.X.Y keeps .Y
+      expect(transpile('<FLAG.X.Y/>', { define: { 'FLAG.X': 'Comp' }, lang: 'tsx' as never })).toContain('<Comp.Y/>')
+
+      // this-rooted tags match their own keys, still nested-this aware
+      expect(transpile('<this.X/>', { define: { 'this.X': 'Comp' }, lang: 'tsx' as never })).toContain('<Comp/>')
+      expect(
+        transpile('function f() { return <this.X/> }', {
+          define: { 'this.X': 'Comp' },
+          lang: 'tsx' as never,
+        }),
+      ).toContain('<this.X/>')
+    })
+
     it('reports warning offsets in UTF-16 units (audit round 9)', () => {
       const warnings: Array<{ start: number, end: number }> = []
       const output = transpile('const x=\"中\"; <FLAG />', {

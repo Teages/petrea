@@ -33,7 +33,7 @@ impl<'a> Walker<'a> {
     /// table. All guards must pass; otherwise the reference is left verbatim.
     pub(crate) fn substitute_identifier_define(&mut self, idx: u32, name: &str, span: Span) {
         let Some(defines) = self.defines else { return };
-        if self.try_jsx_member_tag_define(idx, name) {
+        if self.try_jsx_member_tag_define(idx, ChainRoot::Ident(name.to_string())) {
             return;
         }
         let Some(value) = defines.identifier(name) else { return };
@@ -80,56 +80,74 @@ impl<'a> Walker<'a> {
 
     /// Try a dotted define over a JSX member tag (`<FLAG.X />` with the
     /// `FLAG.X` key): JSX member tags are their own node kind, invisible to
-    /// the ordinary member-chain matcher, so the chain is collected through
-    /// the JSX wrappers and the whole tag name splices at once. Returns
-    /// true when the site was handled — matched, or skipped with a warning.
-    fn try_jsx_member_tag_define(&mut self, idx: u32, name: &str) -> bool {
-        // collect the property chain from the root outward, through JSX
-        // member expressions up to the opening/closing element
-        let mut chain: Vec<&str> = Vec::new();
+    /// the ordinary member-chain matcher, so the property chain is collected
+    /// through the JSX wrappers. The longest matching prefix wins — a
+    /// `FLAG.X` define under `<FLAG.X.Y />` splices the prefix, keeping
+    /// `.Y`. Returns true when the site was handled — matched, or skipped
+    /// with a warning; shadowed roots return false so the identifier path
+    /// can reach its own verdict.
+    fn try_jsx_member_tag_define(&mut self, idx: u32, root: ChainRoot) -> bool {
+        let Some(defines) = self.defines else { return false };
+        // (member node, property) pairs from the root outward, inner first
+        let mut links: Vec<(u32, String)> = Vec::new();
         let mut node = idx;
         loop {
             let parent = self.parent_of(node);
             match self.node_kind(parent) {
                 AstKind::JSXMemberExpression(member) => {
-                    chain.push(member.property.name.as_str());
+                    links.push((parent, member.property.name.as_str().to_string()));
                     node = parent;
                 }
                 AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_) => break,
                 _ => return false,
             }
         }
-        let Some(defines) = self.defines else { return false };
-        chain.reverse();
-        let root = ChainRoot::Ident(name.to_string());
-        let Some(value) = defines.dotted(&chain, &root) else {
-            return false;
-        };
-        // JSX safety for a whole-name splice is judged on the *result*
-        // shape: the original was a member tag, but a bare identifier value
-        // makes the result bare — where lowercase flips to an intrinsic
-        let result_flips = !value.text.contains('.')
-            && value.text.starts_with(|c: char| c.is_ascii_lowercase());
-        if !matches!(value.root, Some(ChainRoot::Ident(_)))
-            || value.text.contains('\\')
-            || result_flips
-        {
-            let span = Span::new(self.node_kind(idx).span().start, self.node_kind(node).span().end);
-            self.blanker.warn("define-jsx-tag", span);
+        // scope guards before any splice: identifier roots resolve like
+        // anywhere else, `this` roots only exist at top level
+        match &root {
+            ChainRoot::Ident(name)
+                if self.define_shadowed(idx, name) || self.inside_with(idx) =>
+            {
+                return false
+            }
+            ChainRoot::This if self.this_is_nested(idx) => return false,
+            _ => {}
+        }
+        // longest prefix first
+        for take in (1..=links.len()).rev() {
+            let chain: Vec<&str> = links[..take].iter().map(|(_, property)| property.as_str()).rev().collect();
+            let Some(value) = defines.dotted(&chain, &root) else {
+                continue;
+            };
+            let end = self.node_kind(links[take - 1].0).span().end;
+            let span = Span::new(self.node_kind(idx).span().start, end);
+            // JSX safety for a whole-name splice is judged on the *result*
+            // shape: a bare lowercase value would flip the tag to an
+            // intrinsic, literals and escapes cannot be tags at all
+            let result_flips = !value.text.contains('.')
+                && value.text.starts_with(|c: char| c.is_ascii_lowercase());
+            if !matches!(value.root, Some(ChainRoot::Ident(_)) | Some(ChainRoot::This))
+                || value.text.contains('\\')
+                || result_flips
+            {
+                self.blanker.warn("define-jsx-tag", span);
+                return true;
+            }
+            self.blanker
+                .output
+                .override_range_sorted(span.start, span.end, value.text.clone());
             return true;
         }
-        // splice the whole tag name, root through the outermost property
-        let span = Span::new(self.node_kind(idx).span().start, self.node_kind(node).span().end);
-        self.blanker
-            .output
-            .override_range_sorted(span.start, span.end, value.text.clone());
-        true
+        false
     }
 
     /// Substitute a bare `this` against the `this` define. Only a top-level
     /// `this` qualifies — see [`Self::this_is_nested`].
     pub(crate) fn substitute_this_define(&mut self, idx: u32, span: Span) {
         let Some(defines) = self.defines else { return };
+        if self.try_jsx_member_tag_define(idx, ChainRoot::This) {
+            return;
+        }
         let Some(value) = defines.this() else { return };
         if self.this_is_nested(idx)
             || self.blanker.output.overlaps_pushed_range(span.start, span.end)
