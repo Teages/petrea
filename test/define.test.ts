@@ -820,6 +820,82 @@ describe('define', () => {
       `)
     })
 
+    it('guards unary splices in ** left and new callee (audit round 4)', () => {
+      const output = transpile(['FLAG ** 2', '2 ** FLAG', 'new FLAG()'].join('\n'), {
+        define: { FLAG: 'undefined' },
+      })
+      expect(output).toContain('(void 0) ** 2')
+      expect(output).toContain('2 ** void 0')
+      expect(output).toContain('new (void 0)()')
+      expect(output).toMatchInlineSnapshot(`
+        "(void 0) ** 2
+        2 ** void 0
+        new (void 0)()"
+      `)
+
+      const negative = transpile('new FLAG()', { define: { FLAG: '-1' } })
+      expect(negative).toContain('new (-1)()')
+      expect(negative).toMatchInlineSnapshot(`"new (-1)()"`)
+    })
+
+    it('sees precedence and directives through TS wrappers (audit round 4)', () => {
+      const output = transpile(['FLAG!.x', 'FLAG! ** 2'].join('\n'), {
+        define: { FLAG: 'undefined' },
+      })
+      expect(output).toContain('(void 0) .x')
+      expect(output).toContain('** 2')
+      expect(output).toMatchInlineSnapshot(`
+        "(void 0) .x
+        (void 0)  ** 2"
+      `)
+
+      const negated = transpile('FLAG! ** 2', { define: { FLAG: '-1' } })
+      expect(negated).toContain('(-1)')
+      expect(negated).toMatchInlineSnapshot(`"(-1)  ** 2"`)
+
+      const directive = transpile('FLAG as any;\nwith(x) {}', {
+        define: { FLAG: '"use strict"' },
+      })
+      expect(directive).toContain('("use strict")')
+      expect(directive).toMatchInlineSnapshot(`
+        "("use strict")       ;
+        with(x) {}"
+      `)
+    })
+
+    it('detaches through generic instantiation expressions (audit round 4)', () => {
+      const output = transpile('(FLAG<number>)()', { define: { FLAG: 'obj.method' } })
+      expect(output).toContain('(0, obj.method)')
+      expect(output).toMatchInlineSnapshot(`"((0, obj.method)        )()"`)
+    })
+
+    it('never replaces inside a with body, only its object (audit round 4)', () => {
+      const output = transpile(
+        'with(obj){return FLAG}\nwith(obj){return FLAG.x}\nwith(FLAG){}',
+        { define: { FLAG: '1' } },
+      )
+      expect(output).toContain('return FLAG}')
+      expect(output).toContain('return FLAG.x}')
+      expect(output).toContain('with(1){}')
+      expect(output).toMatchInlineSnapshot(`
+        "with(obj){return FLAG}
+        with(obj){return FLAG.x}
+        with(1){}"
+      `)
+    })
+
+    it('drops accepted trailing trivia after an undefined chain (audit round 4)', () => {
+      const output = transpile('log(FLAG); after()', { define: { FLAG: 'undefined.x //c' } })
+      expect(output).toBe('log((void 0).x); after()')
+      expect(output).not.toContain('//c')
+    })
+
+    it('matches member chains through transparent wrappers (audit round 4)', () => {
+      const output = transpile('log((a).b); log(a!.b)', { define: { 'a.b': '1' } })
+      expect(output).toContain('log(1); log(1)')
+      expect(output).toMatchInlineSnapshot(`"log(1); log(1)"`)
+    })
+
     it('parenthesizes by expression position, not adjacency (audit round 3)', () => {
       // member objects in every spelling: `FLAG["x"]` and `FLAG .x` are
       // member accesses regardless of what byte follows the reference

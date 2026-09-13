@@ -57,6 +57,10 @@ pub(crate) struct DefineValue {
     /// chains yes (`DEBUG = x`, `this.foo = x`), literals and bare `this`/
     /// `import.meta` no — mirroring esbuild's identifier-or-dot rule
     pub(crate) assignable: bool,
+    /// unary-precedence text (`-1`, `void 0`): needs parentheses wherever an
+    /// unparenthesized unary expression is a syntax error or re-binds — a
+    /// member's object, the left side of `**`, a `new` callee
+    pub(crate) unary: bool,
 }
 
 /// A multi-segment key, matched by its full root + segment list.
@@ -225,6 +229,7 @@ fn parse_value(value: &str, allocator: &Allocator) -> Result<DefineValue, String
             root: None,
             dotted: false,
             assignable: false,
+            unary: true,
         });
     }
     let negative = false;
@@ -241,9 +246,14 @@ fn parse_value(value: &str, allocator: &Allocator) -> Result<DefineValue, String
     // value chains off it: `undefined.x` is `(void 0).x` there
     if matches!(&root, Some(ChainRoot::Ident(name)) if name == "undefined") {
         // `undefined` or `undefined.rest`; the chain's rest is sliced from
-        // the root node's span end, immune to escaped spellings of the root
+        // the root node's span end (immune to escaped spellings of the
+        // root) to the *expression's* end (dropping accepted trailing
+        // trivia), so `\u0075ndefined.x //c` splices `(void 0).x`
         let text = if depth > 0 {
-            format!("(void 0){}", &trimmed[root_span(&parsed).end as usize..])
+            format!(
+                "(void 0){}",
+                &trimmed[root_span(&parsed).end as usize..parsed.span().end as usize]
+            )
         } else {
             "void 0".to_string()
         };
@@ -255,6 +265,7 @@ fn parse_value(value: &str, allocator: &Allocator) -> Result<DefineValue, String
             root: None,
             dotted: depth > 0,
             assignable: depth > 0,
+            unary: depth == 0,
         });
     }
     // the expression's own slice: surrounding trivia (including trailing
@@ -269,6 +280,7 @@ fn parse_value(value: &str, allocator: &Allocator) -> Result<DefineValue, String
         root,
         dotted: depth > 0,
         assignable,
+        unary: false,
     })
 }
 

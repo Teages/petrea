@@ -8,7 +8,15 @@
 //! function/class/enum/namespace name shadows the key), `this` keys replace
 //! only a top-level `this` (one outside any function and class member —
 //! arrows inherit it), write targets take only assignable entity values,
-//! and already-blanked/overridden regions are never spliced into.
+//! names inside a `with` body stay (they may bind dynamically), and
+//! already-blanked/overridden regions are never spliced into.
+//!
+//! Context checks share one notion of the *effective expression after TS
+//! erasure* ([`unwrap_up`]/[`unwrap_down`]): plain parens and the
+//! transparent TS wrappers — `as`, `satisfies`, `!`, instantiation — are
+//! skipped, so receiver detachment, precedence parentheses, directive
+//! wrapping and member-chain matching all see the same context a printer
+//! would once the type syntax is gone.
 
 use oxc_ast::AstKind;
 use oxc_ast::ast::{BinaryOperator, Expression};
@@ -47,37 +55,10 @@ impl<'a> Walker<'a> {
         } else {
             self.detached(idx, span, value, text)
         };
-        let text = self.wrap_directive(idx, span, value, text);
+        let text = self.wrap_directive(idx, value, text);
         self.blanker
             .output
             .override_range_sorted(target.start, target.end, text);
-    }
-
-    /// The receiver-detaching splice for an identifier-position reference
-    /// (`flag()` → `(0, obj.method)()`), transparently claiming the
-    /// parentheses around the reference when there are any; non-detaching
-    /// splices cover the reference's own span.
-    fn detached(
-        &self,
-        idx: u32,
-        span: Span,
-        value: &DefineValue,
-        text: String,
-    ) -> (String, Span) {
-        if value.dotted
-            && let Some((top, only_parens)) = self.call_position_inner(idx)
-        {
-            // claiming the wrapper span requires every link between the
-            // reference and the call to be a plain paren; a TS wrapper's
-            // erasure blank must keep its own range, so the splice stays on
-            // the reference (printing `((0, x) …)` — valid, still detached)
-            let claimable = only_parens && top != idx;
-            return (
-                format!("(0, {text})"),
-                if claimable { self.node_kind(top).span() } else { span },
-            );
-        }
-        (text, span)
     }
 
     /// Substitute a bare `this` against the `this` define. Only a top-level
@@ -91,7 +72,7 @@ impl<'a> Walker<'a> {
             return;
         }
         let (text, target) = self.detached(idx, span, value, self.splice_text(idx, value, span));
-        let text = self.wrap_directive(idx, span, value, text);
+        let text = self.wrap_directive(idx, value, text);
         self.blanker
             .output
             .override_range_sorted(target.start, target.end, text);
@@ -105,7 +86,7 @@ impl<'a> Walker<'a> {
             return;
         }
         let (text, target) = self.detached(idx, span, value, self.splice_text(idx, value, span));
-        let text = self.wrap_directive(idx, span, value, text);
+        let text = self.wrap_directive(idx, value, text);
         self.blanker
             .output
             .override_range_sorted(target.start, target.end, text);
@@ -131,9 +112,9 @@ impl<'a> Walker<'a> {
             _ => return false,
         };
         let Some(limit) = defines.max_dotted_chain(tail) else { return false };
-        // property names from the outermost member inward; the root lands in
-        // `node` and must be a bare identifier reference, `this` (top level
-        // only) or `import.meta`
+        // property names from the outermost member inward; transparent
+        // wrappers between links are skipped, and the root must be a bare
+        // identifier reference, `this` (top level only) or `import.meta`
         let mut chain: Vec<&str> = Vec::new();
         let mut node = idx;
         let root;
@@ -144,14 +125,14 @@ impl<'a> Walker<'a> {
             match self.node_kind(node) {
                 AstKind::StaticMemberExpression(member) => {
                     chain.push(member.property.name.as_str());
-                    node = node_index_of(&member.object);
+                    node = self.unwrap_down(node_index_of(&member.object));
                 }
                 AstKind::ComputedMemberExpression(member) => {
                     let Expression::StringLiteral(literal) = &member.expression else {
                         return false;
                     };
                     chain.push(literal.value.as_str());
-                    node = node_index_of(&member.object);
+                    node = self.unwrap_down(node_index_of(&member.object));
                 }
                 AstKind::IdentifierReference(reference) => {
                     root = (node, ChainRoot::Ident(reference.name.as_str().to_string()));
@@ -184,64 +165,136 @@ impl<'a> Walker<'a> {
         // no receiver detachment here: the original was already a member
         // access — a receiver call — and esbuild keeps it one (only a call
         // that was *not* a property access gets detached when its splice is)
-        let text = self.wrap_directive(idx, span, value, self.splice_text(idx, value, span));
+        let text = self.wrap_directive(idx, value, self.splice_text(idx, value, span));
         self.blanker.output.override_range_sorted(span.start, span.end, text);
         true
     }
 
-    /// Two context wraps a splice may need: a dotted entity in a call or
-    /// template-tag position gets its receiver detached — `(0, obj.method)()`
-    /// calls with `this` undefined instead of `obj`, mirroring esbuild's
-    /// rule of detaching only calls that were not property accesses before
-    /// substitution — and a string literal standing as the whole expression
-    /// statement gets parenthesized so the output cannot grow a
-    /// `"use strict"`-style directive.
-    /// The outermost node wrapping the reference, when that group is the
-    /// callee/tag of a call or tagged template — `(flag)()`, `(flag as any)()`
-    /// and `(flag!)()` all still bind a receiver, so the detachment must see
-    /// through plain parens and the transparent TS wrappers. Returns the
-    /// reference itself for a direct callee/tag.
-    /// The wrapper walk behind the receiver check: the outermost node, and
-    /// whether every link between it and the reference is a plain paren (a
-    /// TS wrapper's erased region cannot be claimed by a splice).
-    fn call_position_inner(&self, idx: u32) -> Option<(u32, bool)> {
+    /// The receiver-detaching splice for an identifier-position reference
+    /// (`flag()` → `(0, obj.method)()`), claiming the parentheses around the
+    /// reference when the whole wrapper chain is parens; non-detaching
+    /// splices cover the reference's own span.
+    fn detached(
+        &self,
+        idx: u32,
+        span: Span,
+        value: &DefineValue,
+        text: String,
+    ) -> (String, Span) {
+        if !value.dotted {
+            return (text, span);
+        }
+        let (top, only_parens) = self.unwrap_up(idx);
+        let parent = self.parent_of(top);
+        if parent == u32::MAX {
+            return (text, span);
+        }
+        let start = self.node_kind(top).span().start;
+        let is_callee = matches!(self.node_kind(parent),
+            AstKind::CallExpression(call) if call.callee.span().start == start)
+            || matches!(self.node_kind(parent),
+                AstKind::TaggedTemplateExpression(tag) if tag.tag.span().start == start);
+        if !is_callee {
+            return (text, span);
+        }
+        // claiming the wrapper span requires every link to be a plain paren;
+        // a TS wrapper's erasure blank keeps its own range, so the splice
+        // stays on the reference there (printing `((0, x) …)` — valid, still
+        // detached)
+        let claimable = only_parens && top != idx;
+        (
+            format!("(0, {text})"),
+            if claimable { self.node_kind(top).span() } else { span },
+        )
+    }
+
+    /// The effective expression context of a reference after erasure: skips
+    /// plain parens and the transparent TS wrappers upward. Returns the
+    /// outermost wrapper (the reference itself when unwrapped) and whether
+    /// every link is a plain paren — a TS wrapper's erased region cannot be
+    /// claimed by a splice, so only an all-paren chain may have its span
+    /// replaced.
+    fn unwrap_up(&self, idx: u32) -> (u32, bool) {
         let mut top = idx;
         let mut only_parens = true;
         loop {
             let parent = self.parent_of(top);
             if parent == u32::MAX {
-                return None;
+                return (top, only_parens && top != idx);
             }
-            let start = self.node_kind(top).span().start;
             match self.node_kind(parent) {
                 AstKind::ParenthesizedExpression(_) => top = parent,
                 AstKind::TSAsExpression(_)
                 | AstKind::TSSatisfiesExpression(_)
-                | AstKind::TSNonNullExpression(_) => {
+                | AstKind::TSNonNullExpression(_)
+                | AstKind::TSInstantiationExpression(_) => {
                     only_parens = false;
                     top = parent;
                 }
-                AstKind::CallExpression(call) if call.callee.span().start == start => {
-                    return Some((top, only_parens))
-                }
-                AstKind::TaggedTemplateExpression(tag) if tag.tag.span().start == start => {
-                    return Some((top, only_parens))
-                }
-                _ => return None,
+                _ => return (top, only_parens && top != idx),
             }
         }
     }
 
+    /// The same transparency downward: the wrapped expression of a paren, TS
+    /// wrapper or chain node — the first flattened child of each.
+    fn unwrap_down(&self, node: u32) -> u32 {
+        match self.node_kind(node) {
+            AstKind::ParenthesizedExpression(_)
+            | AstKind::TSAsExpression(_)
+            | AstKind::TSSatisfiesExpression(_)
+            | AstKind::TSNonNullExpression(_)
+            | AstKind::TSInstantiationExpression(_)
+            | AstKind::ChainExpression(_) => self.children_of(node).next().unwrap_or(node),
+            _ => node,
+        }
+    }
+
+    /// Whether a unary-precedence splice (`-1`, `void 0`) at this reference
+    /// would land where only a high-precedence operand is grammatical: a
+    /// member's object in any spelling, the left side of `**` (the right
+    /// side takes a unary operand), or a `new` callee.
+    fn context_needs_unary_parens(&self, idx: u32) -> bool {
+        let (top, _) = self.unwrap_up(idx);
+        // a paren already prints the splice grouped
+        if matches!(self.node_kind(top), AstKind::ParenthesizedExpression(_)) {
+            return false;
+        }
+        let parent = self.parent_of(top);
+        if parent == u32::MAX {
+            return false;
+        }
+        let start = self.node_kind(top).span().start;
+        match self.node_kind(parent) {
+            AstKind::StaticMemberExpression(member) => member.object.span().start == start,
+            AstKind::ComputedMemberExpression(member) => member.object.span().start == start,
+            AstKind::BinaryExpression(binary) => {
+                binary.operator == BinaryOperator::Exponential
+                    && binary.left.span().start == start
+            }
+            AstKind::NewExpression(new) => new.callee.span().start == start,
+            _ => false,
+        }
+    }
+
     /// A string literal standing as the whole expression statement gets
-    /// parenthesized: spliced bare it would become a directive.
-    fn wrap_directive(&self, idx: u32, span: Span, value: &DefineValue, text: String) -> String {
-        if value.string
-            && matches!(
-                self.node_kind(self.parent_of(idx)),
-                AstKind::ExpressionStatement(statement)
-                    if statement.expression.span() == span
-            )
-        {
+    /// parenthesized: spliced bare it would become a directive. The check
+    /// sees through TS wrappers — `FLAG as any;` is effectively `FLAG;` —
+    /// but not through a paren, which already prints safe.
+    fn wrap_directive(&self, idx: u32, value: &DefineValue, text: String) -> String {
+        if !value.string {
+            return text;
+        }
+        let (top, _) = self.unwrap_up(idx);
+        if matches!(self.node_kind(top), AstKind::ParenthesizedExpression(_)) {
+            return text;
+        }
+        let top_span = self.node_kind(top).span();
+        if matches!(
+            self.node_kind(self.parent_of(top)),
+            AstKind::ExpressionStatement(statement)
+                if statement.expression.span() == top_span
+        ) {
             return format!("({text})");
         }
         text
@@ -249,13 +302,38 @@ impl<'a> Walker<'a> {
 
     /// The guards shared by the identifier and member substitution paths.
     fn define_blocked(&self, idx: u32, span: Span, value: &DefineValue) -> bool {
-        // the erasure pass may have blanked this region (a type position the
-        // flattener could not prune); splicing text back in would corrupt it
-        self.blanker.output.overlaps_pushed_range(span.start, span.end)
+        // inside a `with` body a name may bind to the with object's
+        // properties at runtime, so only the object expression reads outer
+        // scope — and an enclosing `with` may still bind it, so the walk
+        // continues outward from there
+        self.inside_with(idx)
+            // the erasure pass may have blanked this region (a type position the
+            // flattener could not prune); splicing text back in would corrupt it
+            || self.blanker.output.overlaps_pushed_range(span.start, span.end)
             // a literal (or a bare `this`/`import.meta` value) cannot be
             // written through (`42 = x` is a syntax error); entity values
             // may (`DEBUG = x` writes the global)
             || (self.is_write_target(idx) && !value.assignable)
+    }
+
+    /// Whether the node sits inside a `with` body — petrea parses `with`
+    /// through error recovery even in TS/module inputs — where a name may
+    /// bind to the with object dynamically.
+    fn inside_with(&self, mut idx: u32) -> bool {
+        loop {
+            let parent = self.parent_of(idx);
+            if parent == u32::MAX {
+                return false;
+            }
+            if let AstKind::WithStatement(with) = self.node_kind(parent) {
+                let span = self.node_kind(idx).span();
+                let body = with.body.span();
+                if span.start >= body.start && span.end <= body.end {
+                    return true;
+                }
+            }
+            idx = parent;
+        }
     }
 
     /// Whether the node at `idx` is the target of an assignment, update or
@@ -327,9 +405,9 @@ impl<'a> Walker<'a> {
     /// The splice text for a matched span: the value as written — except an
     /// entity root captured by an enum member scope, which is qualified
     /// `Enum.root` (members live on the enum object, not in lexical scope —
-    /// the same qualification the enum emitter gives bare member refs) — plus
-    /// the one space a numeric literal needs when a `.` member follows it
-    /// (`42.x` would lex as `42.` + `x`).
+    /// the same qualification the enum emitter gives bare member refs).
+    /// Unary-precedence and fusion hazards are guarded by position, not
+    /// adjacency (see [`context_needs_unary_parens`]).
     fn splice_text(&self, idx: u32, value: &DefineValue, span: Span) -> String {
         let text = match &value.root {
             Some(ChainRoot::Ident(root)) => match self.name_binding(idx, root) {
@@ -338,48 +416,21 @@ impl<'a> Walker<'a> {
             },
             _ => value.text.clone(),
         };
-        // a `void 0` binds looser than any member access — including a
-        // bracketed or space-separated one — so the object position of a
-        // member splices it parenthesized (an adjacency byte-check would
-        // miss `FLAG["x"]` and `FLAG .x`)
-        if text == "void 0" && self.is_member_object(idx) {
-            return "(void 0)".to_string();
-        }
-        // a negative literal fuses with a preceding `-` (`x-FLAG` → `x--1`),
-        // with the left side of `**` (`-1 ** 2` is a syntax error; the right
-        // side is fine bare — `2 ** -1` — as esbuild prints it), and with a
-        // member access in any spelling (`(-1).x`, also esbuild's form)
-        if value.negative
-            && (self.is_member_object(idx)
-                || self.preceded_by_minus(span)
-                || self.is_exponent_left_operand(idx, span))
-        {
+        if value.unary && self.context_needs_unary_parens(idx) {
             return format!("({text})");
         }
-        // a positive numeric only fuses with a directly adjacent `.` (any
-        // source whitespace survives the splice); a space is esbuild's form
+        // a negative literal also fuses lexically with a preceding `-`
+        // (`x-FLAG` → `x--1`); a positive numeric fuses only with a directly
+        // adjacent `.` (source whitespace survives the splice), gaining the
+        // space esbuild prints
+        if value.negative && self.preceded_by_minus(span) {
+            return format!("({text})");
+        }
         let mut text = text;
         if value.numeric && self.followed_by_dot(span) {
             text.push(' ');
         }
         text
-    }
-
-    /// Whether the node is the object of a member expression — any spelling:
-    /// `.x`, `["x"]`, `?.x`. A parenthesized reference already prints safe.
-    fn is_member_object(&self, idx: u32) -> bool {
-        let parent = self.parent_of(idx);
-        if parent == u32::MAX {
-            return false;
-        }
-        let start = self.node_kind(idx).span().start;
-        matches!(
-            self.node_kind(parent),
-            AstKind::StaticMemberExpression(member) if member.object.span().start == start
-        ) || matches!(
-            self.node_kind(parent),
-            AstKind::ComputedMemberExpression(member) if member.object.span().start == start
-        )
     }
 
     fn followed_by_dot(&self, span: Span) -> bool {
@@ -389,17 +440,6 @@ impl<'a> Walker<'a> {
     fn preceded_by_minus(&self, span: Span) -> bool {
         span.start > 0
             && self.src.as_bytes().get(span.start as usize - 1) == Some(&b'-')
-    }
-
-    /// The left operand of `**`, where an unparenthesized negative literal
-    /// is a syntax error (the right side takes a unary operand fine).
-    fn is_exponent_left_operand(&self, idx: u32, span: Span) -> bool {
-        matches!(
-            self.node_kind(self.parent_of(idx)),
-            AstKind::BinaryExpression(binary)
-                if binary.operator == BinaryOperator::Exponential
-                    && binary.left.span().start == span.start
-        )
     }
 }
 
