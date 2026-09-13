@@ -820,6 +820,60 @@ describe('define', () => {
       `)
     })
 
+    it('substitutes only identifier-shaped values in JSX tags (audit round 6)', () => {
+      const output = transpile('<><FLAG /><FLAG n={FLAG} /></>', {
+        define: { FLAG: 'Comp.Box' },
+        lang: 'tsx' as never,
+      })
+      expect(output).toContain('<Comp.Box /><Comp.Box n={Comp.Box} />')
+      for (const value of ['"x"', 'true', 'undefined', '-1']) {
+        // petrea keeps JSX text: a literal tag would be invalid JSX or the
+        // wrong element type, so the reference stays
+        expect(transpile('<FLAG />', { define: { FLAG: value }, lang: 'tsx' as never })).toContain('<FLAG />')
+      }
+    })
+
+    it('replaces destructuring defaults, which are read positions (audit round 6)', () => {
+      const output = transpile(['[x=FLAG]=[]', '({x=FLAG}={})', '({x:y=FLAG}={})'].join('\n'), {
+        define: { FLAG: '1' },
+      })
+      expect(output).toContain('[x=1]=[]')
+      expect(output).toContain('({x=1}={})')
+      expect(output).toContain('({x:y=1}={})')
+      expect(output).toMatchInlineSnapshot(`
+        "[x=1]=[]
+        ({x=1}={})
+        ({x:y=1}={})"
+      `)
+    })
+
+    it('treats auto-accessor initializers as instance this (audit round 6)', () => {
+      const output = transpile('class C { accessor x = this.foo }', {
+        define: { 'this.foo': '1' },
+      })
+      expect(output).toContain('this.foo')
+      expect(output).toMatchInlineSnapshot(`"class C { accessor x = this.foo }"`)
+    })
+
+    it('unwraps transparent wrappers in computed keys (audit round 6)', () => {
+      const output = transpile('log(a[("b")]); log(a["b" as string]); log(a.b)', {
+        define: { 'a.b': '1' },
+      })
+      expect(output).toContain('log(1); log(1); log(1)')
+      expect(output).toMatchInlineSnapshot(`"log(1); log(1); log(1)"`)
+    })
+
+    it('lets this and import.meta through a with body (audit round 6)', () => {
+      const output = transpile(
+        'with(obj){result=this.x; flag=FLAG; meta=import.meta.env}',
+        { define: { 'this.x': '1', 'FLAG': '1', 'import.meta.env': '1' } },
+      )
+      expect(output).toContain('result=1')
+      expect(output).toContain('flag=FLAG')
+      expect(output).toContain('meta=1')
+      expect(output).toMatchInlineSnapshot(`"with(obj){result=1; flag=FLAG; meta=1}"`)
+    })
+
     it('guards write targets behind TS wrappers (audit round 5)', () => {
       const output = transpile(['FLAG! = 2', 'FLAG!++'].join('\n'), {
         define: { FLAG: '1' },

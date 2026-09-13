@@ -36,7 +36,15 @@ impl<'a> Walker<'a> {
         let Some(value) = defines.identifier(name) else { return };
         if self.define_blocked(idx, span, value)
             || self.define_shadowed(idx, name)
+            // `with` intercepts identifier lookups only — `this` and
+            // `import.meta` are unaffected
+            || self.inside_with(idx)
             || self.is_delete_target(idx)
+            // a JSX tag position takes only identifier-shaped splices —
+            // petrea keeps JSX text, where `<"x" />` is invalid and
+            // `<true />` silently means the string tag (esbuild replaces
+            // freely because it lowers tags to createElement arguments)
+            || (self.is_jsx_tag(idx) && !matches!(value.root, Some(ChainRoot::Ident(_))))
         {
             return;
         }
@@ -47,7 +55,11 @@ impl<'a> Walker<'a> {
         // the wrong property (`{ DEBUG }` reads `.DEBUG`, not `.flag`)
         let shorthand = match self.node_kind(self.parent_of(idx)) {
             AstKind::ObjectProperty(property) => property.shorthand,
-            AstKind::AssignmentTargetPropertyIdentifier(_) => true,
+            // the *binding* of an assignment-target property is the
+            // shorthand; its default is a plain read — `({ x = FLAG } = o)`
+            AstKind::AssignmentTargetPropertyIdentifier(property) => {
+                property.binding.span().start == span.start
+            }
             _ => false,
         };
         let text = self.splice_text(idx, value, span);
@@ -107,7 +119,8 @@ impl<'a> Walker<'a> {
         let tail = match self.node_kind(idx) {
             AstKind::StaticMemberExpression(member) => member.property.name.as_str(),
             AstKind::ComputedMemberExpression(member) => {
-                let Expression::StringLiteral(literal) = &member.expression else {
+                let key = unwrap_expression(&member.expression);
+                let Expression::StringLiteral(literal) = key else {
                     return false;
                 };
                 literal.value.as_str()
@@ -131,7 +144,10 @@ impl<'a> Walker<'a> {
                     node = self.unwrap_down(node_index_of(&member.object));
                 }
                 AstKind::ComputedMemberExpression(member) => {
-                    let Expression::StringLiteral(literal) = &member.expression else {
+                    // the key may hide behind transparent wrappers —
+                    // a[("b")], a["b" as string]
+                    let key = unwrap_expression(&member.expression);
+                    let Expression::StringLiteral(literal) = key else {
                         return false;
                     };
                     chain.push(literal.value.as_str());
@@ -158,7 +174,9 @@ impl<'a> Walker<'a> {
         // identifier roots resolve through the scope model; a `this` root
         // only exists at top level
         let root_blocked = match root_kind {
-            ChainRoot::Ident(name) => self.define_shadowed(root_idx, name),
+            ChainRoot::Ident(name) => {
+                self.define_shadowed(root_idx, name) || self.inside_with(root_idx)
+            }
             ChainRoot::This => self.this_is_nested(root_idx),
             ChainRoot::ImportMeta => false,
         };
@@ -315,14 +333,23 @@ impl<'a> Walker<'a> {
         // properties at runtime, so only the object expression reads outer
         // scope — and an enclosing `with` may still bind it, so the walk
         // continues outward from there
-        self.inside_with(idx)
-            // the erasure pass may have blanked this region (a type position the
-            // flattener could not prune); splicing text back in would corrupt it
-            || self.blanker.output.overlaps_pushed_range(span.start, span.end)
+        // the erasure pass may have blanked this region (a type position the
+        // flattener could not prune); splicing text back in would corrupt it
+        self.blanker.output.overlaps_pushed_range(span.start, span.end)
             // a literal (or a bare `this`/`import.meta` value) cannot be
             // written through (`42 = x` is a syntax error); entity values
             // may (`DEBUG = x` writes the global)
             || (self.is_write_target(idx) && !value.assignable)
+    }
+
+    /// Whether the reference is a JSX element tag — the identifier child of
+    /// an opening/closing element (attribute values live under their own
+    /// container kinds and are ordinary expressions).
+    fn is_jsx_tag(&self, idx: u32) -> bool {
+        matches!(
+            self.node_kind(self.parent_of(idx)),
+            AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_)
+        )
     }
 
     /// Whether the reference is deleted as a bare identifier — `delete
@@ -380,14 +407,17 @@ impl<'a> Walker<'a> {
             AstKind::ForOfStatement(node) => node.left.span().start == start,
             // the operand is the only child, always the target
             AstKind::UpdateExpression(_) => true,
-            // `({ x } = y)` — the binding is always a write position
-            AstKind::AssignmentTargetPropertyIdentifier(_) => true,
-            // array/object destructuring patterns and their ornaments (rest,
-            // defaults) hold only write positions
+            // `({ x } = y)` — the binding writes; the default `({ x = y } = z)`
+            // reads
+            AstKind::AssignmentTargetPropertyIdentifier(node) => {
+                node.binding.span().start == start
+            }
+            // array/object destructuring patterns and rests hold only write
+            // positions; a default's initializer reads — `[x = y] = z`
             AstKind::ArrayAssignmentTarget(_)
             | AstKind::ObjectAssignmentTarget(_)
-            | AstKind::AssignmentTargetRest(_)
-            | AstKind::AssignmentTargetWithDefault(_) => true,
+            | AstKind::AssignmentTargetRest(_) => true,
+            AstKind::AssignmentTargetWithDefault(node) => node.binding.span().start == start,
             // `({ key: NODE_ENV } = o)`: the value side writes; a computed
             // key `({ [k]: x } = o)` is a read position
             AstKind::AssignmentTargetPropertyProperty(node) => {
@@ -417,6 +447,7 @@ impl<'a> Walker<'a> {
             }
             match self.node_kind(parent) {
                 AstKind::Function(_) | AstKind::StaticBlock(_) => return true,
+                AstKind::AccessorProperty(_) => return true,
                 AstKind::PropertyDefinition(node) => {
                     // an initializer gets the instance `this`; a computed key
                     // evaluates in the enclosing `this`, which may itself be
@@ -522,6 +553,21 @@ impl Walker<'_> {
             }
             scope = scope_above(self, scope);
         }
+    }
+}
+
+/// The wrapped expression of a parenthesized or TS-wrapped expression —
+/// repeated, since wrappers nest (`(("b") as string)`).
+fn unwrap_expression<'a>(mut expression: &'a Expression<'a>) -> &'a Expression<'a> {
+    loop {
+        expression = match expression {
+            Expression::ParenthesizedExpression(paren) => &paren.expression,
+            Expression::TSAsExpression(wrapper) => &wrapper.expression,
+            Expression::TSSatisfiesExpression(wrapper) => &wrapper.expression,
+            Expression::TSNonNullExpression(wrapper) => &wrapper.expression,
+            Expression::TSInstantiationExpression(wrapper) => &wrapper.expression,
+            _ => return expression,
+        };
     }
 }
 
