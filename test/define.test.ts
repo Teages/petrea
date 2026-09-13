@@ -820,6 +820,62 @@ describe('define', () => {
       `)
     })
 
+    it('guards write targets behind TS wrappers (audit round 5)', () => {
+      const output = transpile(['FLAG! = 2', 'FLAG!++'].join('\n'), {
+        define: { FLAG: '1' },
+      })
+      expect(output).toContain('FLAG  = 2')
+      expect(output).toContain('FLAG ++')
+      expect(output).not.toMatch(/\b1\b/)
+      expect(output).toMatchInlineSnapshot(`
+        "FLAG  = 2
+        FLAG ++"
+      `)
+    })
+
+    it('guards a parenthesized as-expression write target (audit round 5)', () => {
+      // parses through recovery on its own; the write guard keeps the
+      // reference so the splice cannot emit `(1) = 2`
+      const output = transpile('(FLAG as any) = 2', { define: { FLAG: '1' } })
+      expect(output).toContain('FLAG')
+      expect(output).not.toMatch(/\b1\b/)
+      expect(output).toMatchInlineSnapshot(`"(FLAG       ) = 2"`)
+    })
+
+    it('keeps a deleted bare identifier, still replacing member deletes (audit round 5)', () => {
+      const output = transpile(['delete FLAG', 'delete process.env.NODE_ENV'].join('\n'), {
+        define: { 'FLAG': '1', 'process.env.NODE_ENV': '"x"' },
+      })
+      expect(output).toContain('delete FLAG')
+      expect(output).toContain('delete \"x\"')
+      expect(output).toMatchInlineSnapshot(`
+        "delete FLAG
+        delete "x""
+      `)
+    })
+
+    it('unwraps nested transparent wrappers in member chains (audit round 5)', () => {
+      const output = transpile('log(((a)).b); log(((a.b)).c)', {
+        define: { 'a.b': '1', 'a.b.c': '2' },
+      })
+      expect(output).toContain('log(1); log(2)')
+      expect(output).toMatchInlineSnapshot(`"log(1); log(2)"`)
+    })
+
+    it('resolves computed-key this against the enclosing function (audit round 5)', () => {
+      const output = transpile(
+        ['function f() { return class { [this.x] = 1 } }', 'class C { [this.x] = 1 }'].join('\n'),
+        { define: { 'this.x': '"top"' } },
+      )
+      // inside f the key reads f's `this`; at top level it is the top `this`
+      expect(output).toContain('return class { [this.x] = 1 }')
+      expect(output).toContain('class C { [\"top\"] = 1 }')
+      expect(output).toMatchInlineSnapshot(`
+        "function f() { return class { [this.x] = 1 } }
+        class C { ["top"] = 1 }"
+      `)
+    })
+
     it('guards unary splices in ** left and new callee (audit round 4)', () => {
       const output = transpile(['FLAG ** 2', '2 ** FLAG', 'new FLAG()'].join('\n'), {
         define: { FLAG: 'undefined' },

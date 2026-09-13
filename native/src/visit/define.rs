@@ -19,7 +19,7 @@
 //! would once the type syntax is gone.
 
 use oxc_ast::AstKind;
-use oxc_ast::ast::{BinaryOperator, Expression};
+use oxc_ast::ast::{BinaryOperator, Expression, UnaryOperator};
 use oxc_span::GetSpan;
 use oxc_span::Span;
 
@@ -34,7 +34,10 @@ impl<'a> Walker<'a> {
     pub(crate) fn substitute_identifier_define(&mut self, idx: u32, name: &str, span: Span) {
         let Some(defines) = self.defines else { return };
         let Some(value) = defines.identifier(name) else { return };
-        if self.define_blocked(idx, span, value) || self.define_shadowed(idx, name) {
+        if self.define_blocked(idx, span, value)
+            || self.define_shadowed(idx, name)
+            || self.is_delete_target(idx)
+        {
             return;
         }
         // shorthand positions share one token for key and value: replacing
@@ -237,16 +240,22 @@ impl<'a> Walker<'a> {
     }
 
     /// The same transparency downward: the wrapped expression of a paren, TS
-    /// wrapper or chain node — the first flattened child of each.
-    fn unwrap_down(&self, node: u32) -> u32 {
-        match self.node_kind(node) {
-            AstKind::ParenthesizedExpression(_)
-            | AstKind::TSAsExpression(_)
-            | AstKind::TSSatisfiesExpression(_)
-            | AstKind::TSNonNullExpression(_)
-            | AstKind::TSInstantiationExpression(_)
-            | AstKind::ChainExpression(_) => self.children_of(node).next().unwrap_or(node),
-            _ => node,
+    /// wrapper or chain node — repeated, since wrappers nest (`((a)).b`).
+    fn unwrap_down(&self, mut node: u32) -> u32 {
+        loop {
+            let next = match self.node_kind(node) {
+                AstKind::ParenthesizedExpression(_)
+                | AstKind::TSAsExpression(_)
+                | AstKind::TSSatisfiesExpression(_)
+                | AstKind::TSNonNullExpression(_)
+                | AstKind::TSInstantiationExpression(_)
+                | AstKind::ChainExpression(_) => self.children_of(node).next(),
+                _ => None,
+            };
+            match next {
+                Some(child) if child != node => node = child,
+                _ => return node,
+            }
         }
     }
 
@@ -316,6 +325,20 @@ impl<'a> Walker<'a> {
             || (self.is_write_target(idx) && !value.assignable)
     }
 
+    /// Whether the reference is deleted as a bare identifier — `delete
+    /// FLAG` must keep deleting the global property instead of splicing a
+    /// no-op (`delete 1`). Member-chain deletes still replace; esbuild
+    /// guards the two differently.
+    fn is_delete_target(&self, idx: u32) -> bool {
+        let (top, _) = self.unwrap_up(idx);
+        matches!(
+            self.node_kind(self.parent_of(top)),
+            AstKind::UnaryExpression(unary)
+                if unary.operator == UnaryOperator::Delete
+                    && unary.argument.span().start == self.node_kind(top).span().start
+        )
+    }
+
     /// Whether the node sits inside a `with` body — petrea parses `with`
     /// through error recovery even in TS/module inputs — where a name may
     /// bind to the with object dynamically.
@@ -342,11 +365,15 @@ impl<'a> Walker<'a> {
     /// — with a span-start equality check where the parent also carries a
     /// right-hand side that must not be mistaken for the target.
     fn is_write_target(&self, idx: u32) -> bool {
-        let parent = self.parent_of(idx);
+        // write positions hide behind transparent wrappers — `FLAG! = 2`,
+        // `(FLAG as any) = 2`, `FLAG!++` — so the check works on the
+        // unwrapped top and its parent
+        let (top, _) = self.unwrap_up(idx);
+        let parent = self.parent_of(top);
         if parent == u32::MAX {
             return false;
         }
-        let start = self.node_kind(idx).span().start;
+        let start = self.node_kind(top).span().start;
         match self.node_kind(parent) {
             AstKind::AssignmentExpression(node) => node.left.span().start == start,
             AstKind::ForInStatement(node) => node.left.span().start == start,
@@ -391,10 +418,16 @@ impl<'a> Walker<'a> {
             match self.node_kind(parent) {
                 AstKind::Function(_) | AstKind::StaticBlock(_) => return true,
                 AstKind::PropertyDefinition(node) => {
-                    // computed keys belong to the enclosing this
+                    // an initializer gets the instance `this`; a computed key
+                    // evaluates in the enclosing `this`, which may itself be
+                    // a function's — keep walking outward from there
                     let key = node.key.span();
                     let span = self.node_kind(idx).span();
-                    return !(span.start >= key.start && span.end <= key.end);
+                    if span.start >= key.start && span.end <= key.end {
+                        idx = parent;
+                        continue;
+                    }
+                    return true;
                 }
                 _ => {}
             }
