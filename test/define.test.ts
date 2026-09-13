@@ -446,6 +446,7 @@ describe('define', () => {
       expect(() => transpile('console.log(1)', { define: { x: 'foo()' } })).toThrow()
       expect(() => transpile('console.log(1)', { define: { x: '{ a: 1 }' } })).toThrow()
       expect(() => transpile('console.log(1)', { define: { x: '' } })).toThrow()
+      expect(() => transpile('console.log(1)', { define: { x: '+1' } })).toThrow()
     })
   })
 
@@ -785,6 +786,72 @@ describe('define', () => {
       })
       expect(output).toContain('return NaN')
       expect(output).toMatchInlineSnapshot(`"function f(NaN) { return NaN }"`)
+    })
+
+    it('parenthesizes void 0 before a following member (audit round 2)', () => {
+      const output = transpile('log(FLAG.x); log(FLAG);', { define: { FLAG: 'undefined' } })
+      expect(output).toContain('log((void 0).x);')
+      expect(output).toContain('log(void 0);')
+      expect(output).toMatchInlineSnapshot(`"log((void 0).x); log(void 0);"`)
+    })
+
+    it('keeps an undefined-rooted chain as (void 0).rest (audit round 2)', () => {
+      const output = transpile('log(FLAG); log(FLAG())', { define: { FLAG: 'undefined.x' } })
+      expect(output).toContain('log((void 0).x);')
+      expect(output).toContain('(0, (void 0).x)()')
+      expect(output).toMatchInlineSnapshot(`"log((void 0).x); log((0, (void 0).x)())"`)
+    })
+
+    it('detaches the receiver through parentheses (audit round 2)', () => {
+      const output = transpile('(flag)(); (flag)`t`;', { define: { flag: 'obj.method' } })
+      expect(output).toContain('(0, obj.method)();')
+      expect(output).toContain('(0, obj.method)`t`;')
+      expect(output).toMatchInlineSnapshot(`"(0, obj.method)(); (0, obj.method)\`t\`;"`)
+    })
+
+    it('parenthesizes a member-path string standing as a statement (audit round 2)', () => {
+      const output = transpile('a.b;\nlog(x)', {
+        define: { 'a.b': '"use strict"' },
+      })
+      expect(output).toContain('("use strict");')
+      expect(output).toMatchInlineSnapshot(`
+        "("use strict");
+        log(x)"
+      `)
+    })
+
+    it('accepts negative numbers with position-aware parentheses (audit round 2)', () => {
+      const output = transpile(
+        [
+          'log(FLAG)',
+          'log(FLAG * 2)',
+          'const a = 2 ** FLAG',
+          'const b = FLAG ** 2',
+          'const c = x-FLAG',
+          'const d = -FLAG',
+          'log(FLAG.x)',
+          'const e = FLAG.toFixed(2)',
+        ].join('\n'),
+        { define: { FLAG: '-1' } },
+      )
+      expect(output).toContain('log(-1)')
+      expect(output).toContain('log(-1 * 2)')
+      expect(output).toContain('2 ** (-1)')
+      expect(output).toContain('(-1) ** 2')
+      expect(output).toContain('x-(-1)')
+      expect(output).toContain('-(-1)')
+      expect(output).toContain('log((-1).x)')
+      expect(output).toContain('(-1).toFixed(2)')
+      expect(output).toMatchInlineSnapshot(`
+        "log(-1)
+        log(-1 * 2)
+        const a = 2 ** (-1)
+        const b = (-1) ** 2
+        const c = x-(-1)
+        const d = -(-1)
+        log((-1).x)
+        const e = (-1).toFixed(2)"
+      `)
     })
 
     it('reads all value shapes and guards their writes (TestDefineAssignWarning)', () => {

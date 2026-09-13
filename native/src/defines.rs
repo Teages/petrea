@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use oxc_allocator::Allocator;
-use oxc_ast::ast::Expression;
+use oxc_ast::ast::{Expression, UnaryOperator};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 use oxc_span::GetSpan;
@@ -35,9 +35,14 @@ pub(crate) struct DefineValue {
     /// the expression's own source slice — the user's spelling of the value,
     /// with any surrounding trivia (including trailing comments) excluded
     pub(crate) text: String,
-    /// a `NumericLiteral` — must not fuse with a following `.` member
-    /// (`42.x` would lex as `42.` + `x`), so a space is appended
+    /// a `NumericLiteral` (or its negation) — must not fuse with a
+    /// following `.` member (`42.x` would lex as `42.` + `x`), so a positive
+    /// gains a space and a negative parentheses: `(-1).x`, like esbuild
     pub(crate) numeric: bool,
+    /// a negative numeric literal (`-1`) — fuses with a preceding `-`, with
+    /// either side of `**`, and with a following `.`, so those positions
+    /// splice it parenthesized
+    pub(crate) negative: bool,
     /// a `StringLiteral` — spliced as a whole expression statement it would
     /// become a directive, so it gets parenthesized
     pub(crate) string: bool,
@@ -209,8 +214,22 @@ fn parse_value(value: &str, allocator: &Allocator) -> Result<DefineValue, String
     let parsed = Parser::new(allocator, trimmed, SourceType::mjs().with_module(true))
         .parse_expression()
         .map_err(|_| invalid.clone())?;
+    let negative = is_negative_literal(&parsed);
+    if negative {
+        let span = parsed.span();
+        return Ok(DefineValue {
+            text: trimmed[span.start as usize..span.end as usize].to_string(),
+            numeric: true,
+            negative: true,
+            string: false,
+            root: None,
+            dotted: false,
+            assignable: false,
+        });
+    }
+    let negative = false;
     let root = entity_root(&parsed).ok_or_else(|| invalid.clone())?;
-    let numeric = matches!(parsed, Expression::NumericLiteral(_));
+    let numeric = negative || matches!(parsed, Expression::NumericLiteral(_));
     let string = matches!(parsed, Expression::StringLiteral(_));
     let depth = chain_depth(&parsed);
     // identifiers and dotted chains are assignable; bare `this`/`import.meta`
@@ -218,15 +237,25 @@ fn parse_value(value: &str, allocator: &Allocator) -> Result<DefineValue, String
     let assignable =
         root.is_some() && (matches!(root, Some(ChainRoot::Ident(_))) || depth > 0);
     // `undefined` resolves to EUndefined in esbuild — never a local binding
-    // — and the shadow-immune spelling of that is `void 0`
+    // — and the shadow-immune spelling of that is `void 0`, also when the
+    // value chains off it: `undefined.x` is `(void 0).x` there
     if matches!(&root, Some(ChainRoot::Ident(name)) if name == "undefined") {
+        // the expression slice is `undefined` or `undefined.rest`
+        let span = parsed.span();
+        let slice = &trimmed[span.start as usize..span.end as usize];
+        let text = if depth > 0 {
+            format!("(void 0){}", &slice["undefined".len()..])
+        } else {
+            "void 0".to_string()
+        };
         return Ok(DefineValue {
-            text: "void 0".to_string(),
+            text,
             numeric: false,
+            negative: false,
             string: false,
             root: None,
-            dotted: false,
-            assignable: false,
+            dotted: depth > 0,
+            assignable: depth > 0,
         });
     }
     // the expression's own slice: surrounding trivia (including trailing
@@ -236,11 +265,25 @@ fn parse_value(value: &str, allocator: &Allocator) -> Result<DefineValue, String
     Ok(DefineValue {
         text,
         numeric,
+        negative,
         string,
         root,
         dotted: depth > 0,
         assignable,
     })
+}
+
+/// `-1`: esbuild's JSON-based value parser accepts negated numbers, so the
+/// splice accepts them too — with position-aware parentheses at substitution
+/// time, since a bare `-1` fuses with a preceding `-`, with `**`, and with a
+/// following `.` (where esbuild itself emits invalid syntax for `**`).
+fn is_negative_literal(expression: &Expression<'_>) -> bool {
+    matches!(
+        expression,
+        Expression::UnaryExpression(unary)
+            if unary.operator == UnaryOperator::UnaryNegation
+                && matches!(&unary.argument, Expression::NumericLiteral(_))
+    )
 }
 
 /// The entity root of an expression chain, or `None` for non-literals —
@@ -349,8 +392,10 @@ mod tests {
         for key in ["", "a..b", "a b", "import", "import.env", "await", "3x", "x[y]", "a[0]"] {
             assert!(build(&[(key, "1")]).is_err(), "key {key:?} should be rejected");
         }
-        for value in ["", "1 + 2", "foo()", "{ a: 1 }", "`t${x}`", "-1", "!0", "[1, 2]"] {
+        for value in ["", "1 + 2", "foo()", "{ a: 1 }", "`t${x}`", "+1", "-x", "!0", "[1, 2]"] {
             assert!(build(&[("x", value)]).is_err(), "value {value:?} should be rejected");
         }
+        let negative = build(&[("neg", "-1")]).unwrap();
+        assert!(negative.identifier("neg").unwrap().negative);
     }
 }

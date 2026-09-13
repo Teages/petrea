@@ -11,7 +11,7 @@
 //! and already-blanked/overridden regions are never spliced into.
 
 use oxc_ast::AstKind;
-use oxc_ast::ast::Expression;
+use oxc_ast::ast::{BinaryOperator, Expression};
 use oxc_span::GetSpan;
 use oxc_span::Span;
 
@@ -42,14 +42,35 @@ impl<'a> Walker<'a> {
         let text = self.splice_text(idx, value, span);
         // a destructured value is a write target — receiver detachment and
         // directive wrapping never apply inside it
-        let text = if shorthand {
-            format!("{name}: {text}")
+        let (text, target) = if shorthand {
+            (format!("{name}: {text}"), span)
         } else {
-            self.wrap_splice(idx, span, value, text)
+            self.detached(idx, span, value, text)
         };
+        let text = self.wrap_directive(idx, span, value, text);
         self.blanker
             .output
-            .override_range_sorted(span.start, span.end, text);
+            .override_range_sorted(target.start, target.end, text);
+    }
+
+    /// The receiver-detaching splice for an identifier-position reference
+    /// (`flag()` → `(0, obj.method)()`), transparently claiming the
+    /// parentheses around the reference when there are any; non-detaching
+    /// splices cover the reference's own span.
+    fn detached(
+        &self,
+        idx: u32,
+        span: Span,
+        value: &DefineValue,
+        text: String,
+    ) -> (String, Span) {
+        if value.dotted && let Some(top) = self.call_position(idx) {
+            return (
+                format!("(0, {text})"),
+                if top == idx { span } else { self.node_kind(top).span() },
+            );
+        }
+        (text, span)
     }
 
     /// Substitute a bare `this` against the `this` define. Only a top-level
@@ -62,8 +83,11 @@ impl<'a> Walker<'a> {
         {
             return;
         }
-        let text = self.splice_text(idx, value, span);
-        self.blanker.output.override_range_sorted(span.start, span.end, text);
+        let (text, target) = self.detached(idx, span, value, self.splice_text(idx, value, span));
+        let text = self.wrap_directive(idx, span, value, text);
+        self.blanker
+            .output
+            .override_range_sorted(target.start, target.end, text);
     }
 
     /// Substitute a bare `import.meta` against the `import.meta` define.
@@ -73,8 +97,11 @@ impl<'a> Walker<'a> {
         if self.blanker.output.overlaps_pushed_range(span.start, span.end) {
             return;
         }
-        let text = self.splice_text(idx, value, span);
-        self.blanker.output.override_range_sorted(span.start, span.end, text);
+        let (text, target) = self.detached(idx, span, value, self.splice_text(idx, value, span));
+        let text = self.wrap_directive(idx, span, value, text);
+        self.blanker
+            .output
+            .override_range_sorted(target.start, target.end, text);
     }
 
     /// Try to substitute the member chain rooted at member node `idx`.
@@ -150,7 +177,7 @@ impl<'a> Walker<'a> {
         // no receiver detachment here: the original was already a member
         // access — a receiver call — and esbuild keeps it one (only a call
         // that was *not* a property access gets detached when its splice is)
-        let text = self.splice_text(idx, value, span);
+        let text = self.wrap_directive(idx, span, value, self.splice_text(idx, value, span));
         self.blanker.output.override_range_sorted(span.start, span.end, text);
         true
     }
@@ -162,17 +189,34 @@ impl<'a> Walker<'a> {
     /// substitution — and a string literal standing as the whole expression
     /// statement gets parenthesized so the output cannot grow a
     /// `"use strict"`-style directive.
-    fn wrap_splice(&self, idx: u32, span: Span, value: &DefineValue, text: String) -> String {
-        let start = span.start;
-        if value.dotted
-            && match self.node_kind(self.parent_of(idx)) {
-                AstKind::CallExpression(call) => call.callee.span().start == start,
-                AstKind::TaggedTemplateExpression(tag) => tag.tag.span().start == start,
-                _ => false,
+    /// The outermost node of the reference's parenthesis group, when that
+    /// group is the callee/tag of a call or tagged template — `(flag)()`
+    /// still binds a receiver, so the detachment must claim the parentheses.
+    /// Returns the reference itself for a direct callee/tag.
+    fn call_position(&self, idx: u32) -> Option<u32> {
+        let mut top = idx;
+        loop {
+            let parent = self.parent_of(top);
+            if parent == u32::MAX {
+                return None;
             }
-        {
-            return format!("(0, {text})");
+            let start = self.node_kind(top).span().start;
+            match self.node_kind(parent) {
+                AstKind::ParenthesizedExpression(_) => top = parent,
+                AstKind::CallExpression(call) if call.callee.span().start == start => {
+                    return Some(top)
+                }
+                AstKind::TaggedTemplateExpression(tag) if tag.tag.span().start == start => {
+                    return Some(top)
+                }
+                _ => return None,
+            }
         }
+    }
+
+    /// A string literal standing as the whole expression statement gets
+    /// parenthesized: spliced bare it would become a directive.
+    fn wrap_directive(&self, idx: u32, span: Span, value: &DefineValue, text: String) -> String {
         if value.string
             && matches!(
                 self.node_kind(self.parent_of(idx)),
@@ -269,17 +313,53 @@ impl<'a> Walker<'a> {
     /// the one space a numeric literal needs when a `.` member follows it
     /// (`42.x` would lex as `42.` + `x`).
     fn splice_text(&self, idx: u32, value: &DefineValue, span: Span) -> String {
-        let mut text = match &value.root {
+        let text = match &value.root {
             Some(ChainRoot::Ident(root)) => match self.name_binding(idx, root) {
                 NameBinding::EnumMember(enum_name) => format!("{enum_name}.{}", value.text),
                 _ => value.text.clone(),
             },
             _ => value.text.clone(),
         };
-        if value.numeric && self.src.as_bytes().get(span.end as usize) == Some(&b'.') {
+        // a `void 0` binds looser than a following `.` member
+        // (`void 0.x` is `void (0.x)`)
+        if text == "void 0" && self.followed_by_dot(span) {
+            return "(void 0)".to_string();
+        }
+        // a negative literal fuses with a preceding `-` (`x-FLAG` → `x--1`),
+        // with either side of `**` (`-1 ** 2` and `2 ** -1` are syntax
+        // errors — esbuild emits the latter verbatim), and with a following
+        // `.` (`(-1).x`, which is also how esbuild prints it)
+        if value.negative
+            && (self.followed_by_dot(span)
+                || self.preceded_by_minus(span)
+                || self.is_exponent_operand(idx))
+        {
+            return format!("({text})");
+        }
+        let mut text = text;
+        if value.numeric && self.followed_by_dot(span) {
             text.push(' ');
         }
         text
+    }
+
+    fn followed_by_dot(&self, span: Span) -> bool {
+        self.src.as_bytes().get(span.end as usize) == Some(&b'.')
+    }
+
+    fn preceded_by_minus(&self, span: Span) -> bool {
+        span.start > 0
+            && self.src.as_bytes().get(span.start as usize - 1) == Some(&b'-')
+    }
+
+    /// Either operand of `**`, where an unparenthesized negative literal is
+    /// a syntax error.
+    fn is_exponent_operand(&self, idx: u32) -> bool {
+        matches!(
+            self.node_kind(self.parent_of(idx)),
+            AstKind::BinaryExpression(binary)
+                if binary.operator == BinaryOperator::Exponential
+        )
     }
 }
 
