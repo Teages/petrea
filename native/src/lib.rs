@@ -11,6 +11,7 @@ macro_rules! node_index {
 }
 
 mod blank;
+mod defines;
 mod transpile;
 mod visit;
 
@@ -28,6 +29,10 @@ pub struct TranspileNativeOptions {
     /// Source path quoted in parse-failure diagnostics; its extension also
     /// selects the parse mode (a `.tsx` filename enables JSX).
     pub filename: Option<String>,
+    /// esbuild-style defines: dotted global paths replaced by the source text
+    /// of a primitive literal or an entity name. Validated before parsing;
+    /// invalid entries reject the whole transpile.
+    pub define: Option<std::collections::HashMap<String, String>>,
 }
 
 /// A TypeScript-only construct with runtime semantics that was kept verbatim.
@@ -61,6 +66,10 @@ fn resolve_filename(options: Option<&TranspileNativeOptions>) -> String {
             "input.ts".to_string()
         }
     })
+}
+
+fn resolve_defines(options: Option<&TranspileNativeOptions>) -> Option<std::collections::HashMap<String, String>> {
+    options.and_then(|o| o.define.clone())
 }
 
 /// The API contract (`types.ts`) promises JS string indices (UTF-16 code
@@ -105,6 +114,7 @@ fn to_napi_result(
 pub struct TranspileTask {
     input: String,
     filename: String,
+    defines: Option<std::collections::HashMap<String, String>>,
 }
 
 impl Task for TranspileTask {
@@ -115,6 +125,7 @@ impl Task for TranspileTask {
         to_napi_result(transpile::transpile_caught(
             std::mem::take(&mut self.input),
             &self.filename,
+            self.defines.as_ref(),
         ))
     }
 
@@ -131,7 +142,8 @@ pub fn transpile_async(
     options: Option<TranspileNativeOptions>,
 ) -> AsyncTask<TranspileTask> {
     let filename = resolve_filename(options.as_ref());
-    AsyncTask::new(TranspileTask { input, filename })
+    let defines = resolve_defines(options.as_ref());
+    AsyncTask::new(TranspileTask { input, filename, defines })
 }
 
 /// Synchronous counterpart of `transpile_async` (the JS `transpileSync` export).
@@ -141,7 +153,8 @@ pub fn transpile_native_sync(
     options: Option<TranspileNativeOptions>,
 ) -> Result<TranspileNativeResult> {
     let filename = resolve_filename(options.as_ref());
-    to_napi_result(transpile::transpile_caught(input, &filename))
+    let defines = resolve_defines(options.as_ref());
+    to_napi_result(transpile::transpile_caught(input, &filename, defines.as_ref()))
 }
 
 #[cfg(test)]
@@ -289,7 +302,7 @@ mod perf_bench {
         // the clone stands in for the JS-string → Rust-String copy the napi
         // boundary always performs, so the in-place output path is measured
         let output =
-            crate::transpile::transpile(input.to_string(), "input.ts").expect("transpiles");
+            crate::transpile::transpile(input.to_string(), "input.ts", None).expect("transpiles");
         std::hint::black_box(output.code.len() + output.unsupported.len())
     }
 }
@@ -297,6 +310,7 @@ mod perf_bench {
 pub struct TranspileUnitsTask {
     units: Vec<u16>,
     filename: String,
+    defines: Option<std::collections::HashMap<String, String>>,
 }
 
 impl Task for TranspileUnitsTask {
@@ -307,6 +321,7 @@ impl Task for TranspileUnitsTask {
         to_napi_units_result(transpile::transpile_units_caught(
             std::mem::take(&mut self.units),
             &self.filename,
+            self.defines.as_ref(),
         ))
     }
 
@@ -323,8 +338,9 @@ pub fn transpile_utf16_async(
     options: Option<TranspileNativeOptions>,
 ) -> AsyncTask<TranspileUnitsTask> {
     let filename = resolve_filename(options.as_ref());
+    let defines = resolve_defines(options.as_ref());
     let units = units.to_vec();
-    AsyncTask::new(TranspileUnitsTask { units, filename })
+    AsyncTask::new(TranspileUnitsTask { units, filename, defines })
 }
 
 /// Synchronous UTF-16 entry point (see [`transpile_utf16_async`]).
@@ -334,6 +350,11 @@ pub fn transpile_utf16_sync(
     options: Option<TranspileNativeOptions>,
 ) -> Result<TranspileUnitsResult> {
     let filename = resolve_filename(options.as_ref());
+    let defines = resolve_defines(options.as_ref());
     // one copy into an owned buffer — the output side reuses it in place
-    to_napi_units_result(transpile::transpile_units_caught(units.to_vec(), &filename))
+    to_napi_units_result(transpile::transpile_units_caught(
+        units.to_vec(),
+        &filename,
+        defines.as_ref(),
+    ))
 }

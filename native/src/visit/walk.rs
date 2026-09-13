@@ -314,16 +314,22 @@ pub struct Walker<'a> {
     /// the scope array exists only when binding resolution needs it.
     pub(crate) parent: Vec<u32>,
     pub(crate) node_scope: Vec<u32>,
+    /// esbuild-style defines; `None` on every define-free transpile, so all
+    /// substitution paths early-out and the walk is unchanged.
+    pub(crate) defines: Option<&'a crate::defines::Defines>,
 }
 
 /// Two tiers: parents are cheap and every enum-declaring file gets them; the
 /// scope serials and the whole-file binding registry exist only for binding
 /// resolution — self-contained enums (the common case) skip the heavy model,
 /// and [`enums::collect::collect_enum_declarations`] decides by requesting it.
+/// Active defines always need it: every reference must resolve against the
+/// registry to know whether it is unbound.
 fn prepare_enum_tables(walker: &mut Walker<'_>, enum_indices: &[u32]) {
     walker.parent = derive_parents(&walker.first_child, &walker.next_sibling);
+    let defines_active = walker.defines.is_some_and(|d| !d.is_empty());
     let mut collected = enums::collect::collect_enum_declarations(walker, enum_indices);
-    if collected.needs_scope_model {
+    if collected.needs_scope_model || defines_active {
         walker.node_scope = derive_node_scopes(
             &walker.nodes,
             &walker.parent,
@@ -363,6 +369,7 @@ pub fn blank_program<'a>(
     program: &Program<'a>,
     src: &'a str,
     tokens: &'a [Token],
+    defines: Option<&crate::defines::Defines>,
 ) -> (BlankString, Vec<UnsupportedSyntax>) {
     let mut flattener = Flattener::default();
     flattener.visit_program(program);
@@ -386,6 +393,7 @@ pub fn blank_program<'a>(
         enum_folds: HashMap::new(),
         parent: Vec::new(),
         node_scope: Vec::new(),
+        defines,
     };
 
     // directives are prepended to the statement list (statement-like, not a function body)
@@ -396,7 +404,7 @@ pub fn blank_program<'a>(
     for stmt in &program.body {
         indices.push(statement_index(stmt));
     }
-    if !enum_indices.is_empty() {
+    if !enum_indices.is_empty() || defines.is_some_and(|d| !d.is_empty()) {
         prepare_enum_tables(&mut walker, &enum_indices);
     }
     walker.visit_node_array(&indices, true, false);
@@ -414,6 +422,7 @@ pub fn blank_program_utf16<'a>(
     parse_copy: &'a str,
     byte_to_unit: &'a [u32],
     tokens: &'a [Token],
+    defines: Option<&crate::defines::Defines>,
 ) -> (BlankString, Vec<UnsupportedSyntax>) {
     let mut flattener = Flattener::default();
     flattener.visit_program(program);
@@ -437,6 +446,7 @@ pub fn blank_program_utf16<'a>(
         enum_folds: HashMap::new(),
         parent: Vec::new(),
         node_scope: Vec::new(),
+        defines,
     };
 
     let mut indices = Vec::with_capacity(program.directives.len() + program.body.len());
@@ -446,7 +456,7 @@ pub fn blank_program_utf16<'a>(
     for stmt in &program.body {
         indices.push(statement_index(stmt));
     }
-    if !enum_indices.is_empty() {
+    if !enum_indices.is_empty() || defines.is_some_and(|d| !d.is_empty()) {
         prepare_enum_tables(&mut walker, &enum_indices);
     }
     walker.visit_node_array(&indices, true, false);
@@ -713,11 +723,26 @@ impl<'a> Walker<'a> {
     pub(crate) fn visit_node(&mut self, idx: u32) -> VisitResult {
         let kind = self.nodes[idx as usize];
         match kind {
-            // all identifier flavors are plain JS
-            AstKind::IdentifierReference(_)
-            | AstKind::IdentifierName(_)
+            // a reference may carry a define substitution; the other
+            // identifier flavors are plain JS
+            AstKind::IdentifierReference(n) => {
+                self.substitute_identifier_define(idx, n.name.as_str(), n.span());
+                VisitResult::Js
+            }
+            AstKind::IdentifierName(_)
             | AstKind::BindingIdentifier(_)
             | AstKind::LabelIdentifier(_) => VisitResult::Js,
+
+            // a member chain may match a dotted define; unmatched chains fall
+            // through to the child walk, which retries the shorter suffixes
+            AstKind::StaticMemberExpression(_)
+            | AstKind::ComputedMemberExpression(_) => {
+                if self.substitute_member_define(idx) {
+                    VisitResult::Js
+                } else {
+                    self.visit_children(idx)
+                }
+            }
 
             AstKind::ImportDeclaration(n) => statement::visit_import_declaration(self, n),
 

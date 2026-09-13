@@ -28,15 +28,9 @@ export interface TranspileOptions {
    */
   readonly filename?: string
   /**
-   * Compile-time replacement of global references, esbuild-style. Keys are
-   * dot-separated global paths (`__DEV__`, `process.env.NODE_ENV`); values
-   * are the source text of a primitive literal (`true`, `42`, `'"production"'`,
-   * `123n`, `null`) or an entity name (`DEBUG`, `undefined`) spliced into
-   * every unshadowed reference. References that a local binding shadows, and
-   * writes to literal-valued defines, are left untouched.
-   *
-   * Not yet implemented: the option is accepted but currently ignored — the
-   * output is identical to a transpile without it.
+   * Compile-time replacement of global references, esbuild-style:
+   * `{ __DEV__: 'true', 'process.env.NODE_ENV': '"production"' }`.
+   * Purely textual: shadowed references and writes are left untouched.
    */
   readonly define?: Readonly<Record<string, string>>
 }

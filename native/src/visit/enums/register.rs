@@ -82,6 +82,9 @@ pub(super) fn register_other_node<'a>(w: &Walker<'a>, idx: u32, bindings: &mut C
         AstKind::VariableDeclaration(node) => {
             register_variable(w, idx, node, bindings);
         }
+        AstKind::TSNamespaceDeclaration(node) => {
+            register_namespace_name(w, idx, node, bindings);
+        }
         AstKind::FormalParameters(_) => {
             register_parameters(w, idx, bindings);
         }
@@ -174,17 +177,37 @@ fn register_imports<'a>(
     }
 }
 
+/// A runtime namespace (`namespace N { … }`, not `declare`d — ambient ones
+/// are erased) binds its name in the enclosing statement list; its body gets
+/// the module-block scope. The name reads the namespace object at runtime,
+/// never a defined global of the same name.
+fn register_namespace_name<'a>(
+    w: &Walker<'a>,
+    idx: u32,
+    node: &TSNamespaceDeclaration<'a>,
+    bindings: &mut ConstBindings<'a>,
+) {
+    if !node.declare {
+        bind_shadow(bindings, w.node_scope(idx), node.id.name.as_str());
+    }
+}
+
 /// Register one variable declaration. A `const` declarator binding a simple,
 /// annotation-free name with an initializer joins the fold candidates; every
 /// other bound name becomes a shadow marker. `let`/`const` bind in their
 /// enclosing scope (the loop-head scope for a for-head); `var` hoists to the
-/// innermost function-like container, including out of for heads.
+/// innermost function-like container, including out of for heads. Ambient
+/// (`declare`) declarations are erased wholesale, so they bind nothing: a
+/// reference reads the runtime global — exactly what defines must replace.
 fn register_variable<'a>(
     w: &Walker<'a>,
     index: u32,
     node: &'a VariableDeclaration<'a>,
     bindings: &mut ConstBindings<'a>,
 ) {
+    if node.declare {
+        return;
+    }
     let scope = if node.kind == VariableDeclarationKind::Var {
         var_scope_of(w, index)
     } else {
