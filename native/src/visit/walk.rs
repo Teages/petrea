@@ -726,7 +726,9 @@ impl<'a> Walker<'a> {
             // a reference may carry a define substitution; the other
             // identifier flavors are plain JS
             AstKind::IdentifierReference(n) => {
-                self.substitute_identifier_define(idx, n.name.as_str(), n.span());
+                if self.defines.is_some() {
+                    self.substitute_identifier_define(idx, n.name.as_str(), n.span());
+                }
                 VisitResult::Js
             }
             AstKind::IdentifierName(_)
@@ -737,7 +739,7 @@ impl<'a> Walker<'a> {
             // through to the child walk, which retries the shorter suffixes
             AstKind::StaticMemberExpression(_)
             | AstKind::ComputedMemberExpression(_) => {
-                if self.substitute_member_define(idx) {
+                if self.defines.is_some() && self.substitute_member_define(idx) {
                     VisitResult::Js
                 } else {
                     self.visit_children(idx)

@@ -67,7 +67,9 @@ pub fn transpile(
     let defines = defines
         .map(|entries| Defines::new(entries, allocator))
         .transpose()
-        .map_err(|error| format!("invalid define: {error}"))?;
+        .map_err(|error| format!("invalid define: {error}"))?
+        // an empty map is no defines at all: no scope model, no substitution
+        .filter(|defines| !defines.is_empty());
     // unknown/no extension falls back to plain JavaScript (module, no JSX):
     // TypeScript syntax fails there instead of parsing as TS
     let source_type = SourceType::from_path(filename)
@@ -169,7 +171,9 @@ pub fn transpile_units(
     let defines = defines
         .map(|entries| Defines::new(entries, allocator))
         .transpose()
-        .map_err(|error| format!("invalid define: {error}"))?;
+        .map_err(|error| format!("invalid define: {error}"))?
+        // an empty map is no defines at all: no scope model, no substitution
+        .filter(|defines| !defines.is_empty());
     // same extension fallback as [`transpile`]
     let source_type = SourceType::from_path(filename)
         .unwrap_or_else(|_| SourceType::mjs())

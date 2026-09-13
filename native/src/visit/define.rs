@@ -29,19 +29,27 @@ impl<'a> Walker<'a> {
         if self.define_blocked(idx, span, value) || self.define_shadowed(idx, name) {
             return;
         }
-        // a shorthand property's key shares the value's token: replacing in
-        // place would corrupt the key, so the splice becomes `name: value`
-        // (the assignment-target shorthand `({ x } = y)` is a different node
-        // kind and already handled by the write guard above)
-        let text = if matches!(
-            self.node_kind(self.parent_of(idx)),
-            AstKind::ObjectProperty(property) if property.shorthand
-        ) {
-            format!("{name}: {}", self.splice_text(idx, value, span))
-        } else {
-            self.splice_text(idx, value, span)
+        // shorthand positions share one token for key and value: replacing
+        // in place would corrupt the key, so the splice expands to
+        // `name: value` — object literals (`{ x }`) and destructuring
+        // assignment (`({ x } = y)`) alike; the latter would otherwise read
+        // the wrong property (`{ DEBUG }` reads `.DEBUG`, not `.flag`)
+        let shorthand = match self.node_kind(self.parent_of(idx)) {
+            AstKind::ObjectProperty(property) => property.shorthand,
+            AstKind::AssignmentTargetPropertyIdentifier(_) => true,
+            _ => false,
         };
-        self.blanker.output.override_range_sorted(span.start, span.end, text);
+        let text = self.splice_text(idx, value, span);
+        // a destructured value is a write target — receiver detachment and
+        // directive wrapping never apply inside it
+        let text = if shorthand {
+            format!("{name}: {text}")
+        } else {
+            self.wrap_splice(idx, span, value, text)
+        };
+        self.blanker
+            .output
+            .override_range_sorted(span.start, span.end, text);
     }
 
     /// Substitute a bare `this` against the `this` define. Only a top-level
@@ -75,6 +83,20 @@ impl<'a> Walker<'a> {
     /// which retries the shorter suffix chains and the chain's root.
     pub(crate) fn substitute_member_define(&mut self, idx: u32) -> bool {
         let Some(defines) = self.defines else { return false };
+        // the outermost property decides candidacy up front: no key ends
+        // with it means no chain to build (the common case for every member
+        // expression in a define-active file)
+        let tail = match self.node_kind(idx) {
+            AstKind::StaticMemberExpression(member) => member.property.name.as_str(),
+            AstKind::ComputedMemberExpression(member) => {
+                let Expression::StringLiteral(literal) = &member.expression else {
+                    return false;
+                };
+                literal.value.as_str()
+            }
+            _ => return false,
+        };
+        let Some(limit) = defines.max_dotted_chain(tail) else { return false };
         // property names from the outermost member inward; the root lands in
         // `node` and must be a bare identifier reference, `this` (top level
         // only) or `import.meta`
@@ -82,6 +104,9 @@ impl<'a> Walker<'a> {
         let mut node = idx;
         let root;
         loop {
+            if chain.len() > limit {
+                return false;
+            }
             match self.node_kind(node) {
                 AstKind::StaticMemberExpression(member) => {
                     chain.push(member.property.name.as_str());
@@ -122,9 +147,42 @@ impl<'a> Walker<'a> {
         if root_blocked || self.define_blocked(idx, span, value) {
             return false;
         }
+        // no receiver detachment here: the original was already a member
+        // access — a receiver call — and esbuild keeps it one (only a call
+        // that was *not* a property access gets detached when its splice is)
         let text = self.splice_text(idx, value, span);
         self.blanker.output.override_range_sorted(span.start, span.end, text);
         true
+    }
+
+    /// Two context wraps a splice may need: a dotted entity in a call or
+    /// template-tag position gets its receiver detached — `(0, obj.method)()`
+    /// calls with `this` undefined instead of `obj`, mirroring esbuild's
+    /// rule of detaching only calls that were not property accesses before
+    /// substitution — and a string literal standing as the whole expression
+    /// statement gets parenthesized so the output cannot grow a
+    /// `"use strict"`-style directive.
+    fn wrap_splice(&self, idx: u32, span: Span, value: &DefineValue, text: String) -> String {
+        let start = span.start;
+        if value.dotted
+            && match self.node_kind(self.parent_of(idx)) {
+                AstKind::CallExpression(call) => call.callee.span().start == start,
+                AstKind::TaggedTemplateExpression(tag) => tag.tag.span().start == start,
+                _ => false,
+            }
+        {
+            return format!("(0, {text})");
+        }
+        if value.string
+            && matches!(
+                self.node_kind(self.parent_of(idx)),
+                AstKind::ExpressionStatement(statement)
+                    if statement.expression.span() == span
+            )
+        {
+            return format!("({text})");
+        }
+        text
     }
 
     /// The guards shared by the identifier and member substitution paths.
@@ -245,14 +303,21 @@ impl Walker<'_> {
         if self.node_scope.is_empty() {
             return NameBinding::Global;
         }
-        let units: Vec<u16> = name.encode_utf16().collect();
+        // most define-active files declare no enums: skip the member lookup
+        // (and its UTF-16 allocation) entirely
+        let enum_scopes = (!self.enum_members.is_empty())
+            .then(|| &self.const_bindings.enum_scopes);
+        let units: Option<Vec<u16>> = enum_scopes
+            .is_some()
+            .then(|| name.encode_utf16().collect());
         let mut scope = self.node_scope(idx);
         loop {
-            if let Some(group) = self.const_bindings.enum_scopes.get(&scope)
+            if let (Some(scopes), Some(units)) = (enum_scopes, units.as_ref())
+                && let Some(group) = scopes.get(&scope)
                 && self
                     .enum_members
                     .get(group)
-                    .is_some_and(|members| members.names.contains(&units))
+                    .is_some_and(|members| members.names.contains(units))
             {
                 return NameBinding::EnumMember(group.1.clone());
             }

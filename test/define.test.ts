@@ -131,10 +131,10 @@ describe('define', () => {
       expect(output).toMatchInlineSnapshot(`"log(a[b].c)"`)
     })
 
-    it('splices undefined as a plain entity value', () => {
+    it('splices undefined as shadow-immune void 0', () => {
       const output = transpile('console.log(flag)', { define: { flag: 'undefined' } })
-      expect(output).toContain('console.log(undefined)')
-      expect(output).toMatchInlineSnapshot(`"console.log(undefined)"`)
+      expect(output).toContain('console.log(void 0)')
+      expect(output).toMatchInlineSnapshot(`"console.log(void 0)"`)
     })
 
     it('replaces call targets', () => {
@@ -375,10 +375,10 @@ describe('define', () => {
       const output = transpile(['({ flag } = o)', '[flag] = xs'].join('\n'), {
         define: { flag: 'DEBUG' },
       })
-      expect(output).toContain('({ DEBUG } = o)')
+      expect(output).toContain('({ flag: DEBUG } = o)')
       expect(output).toContain('[DEBUG] = xs')
       expect(output).toMatchInlineSnapshot(`
-        "({ DEBUG } = o)
+        "({ flag: DEBUG } = o)
         [DEBUG] = xs"
       `)
     })
@@ -565,10 +565,10 @@ describe('define', () => {
         define: { a: 'NaN', b: 'Infinity', c: 'undefined', d: 'something', e: 'null' },
       })
       expect(output).toContain('typeof NaN')
-      expect(output).toContain('typeof undefined')
+      expect(output).toContain('typeof void 0')
       expect(output).toContain('typeof null')
       expect(output).not.toContain('"number"')
-      expect(output).toMatchInlineSnapshot(`"console.log([typeof NaN, typeof Infinity, typeof undefined, typeof something, typeof null])"`)
+      expect(output).toMatchInlineSnapshot(`"console.log([typeof NaN, typeof Infinity, typeof void 0, typeof something, typeof null])"`)
     })
 
     it('splices BigInt values verbatim (defineBigInt)', () => {
@@ -713,6 +713,78 @@ describe('define', () => {
         "b.c()
         y()"
       `)
+    })
+
+    it('detaches the receiver when an identifier call becomes a method call', () => {
+      const output = transpile(
+        ['flag()', 'flag`tpl`', 'flag?.()', 'new flag()', 'notFlag()'].join('\n'),
+        { define: { flag: 'obj.method', notFlag: 'obj.also' } },
+      )
+      expect(output).toContain('(0, obj.method)()')
+      expect(output).toContain('(0, obj.method)`tpl`')
+      expect(output).toContain('(0, obj.method)?.()')
+      expect(output).toContain('new obj.method()')
+      expect(output).toMatchInlineSnapshot(`
+        "(0, obj.method)()
+        (0, obj.method)\`tpl\`
+        (0, obj.method)?.()
+        new obj.method()
+        (0, obj.also)()"
+      `)
+    })
+
+    it('keeps a receiver call when a member-call define stays a member call', () => {
+      // `a.b()` already bound `a` as the receiver; splicing another member
+      // expression keeps that shape — esbuild's TargetWasOriginallyPropertyAccess
+      const output = transpile('a.b()', { define: { 'a.b': 'obj.method' } })
+      expect(output).toContain('obj.method()')
+      expect(output).not.toContain('(0,')
+      expect(output).toMatchInlineSnapshot(`"obj.method()"`)
+    })
+
+    it('expands destructuring shorthand so the read property stays the key', () => {
+      const output = transpile('({ flag } = obj); ({ flag: keep } = obj);', {
+        define: { flag: 'DEBUG' },
+      })
+      expect(output).toContain('({ flag: DEBUG } = obj);')
+      expect(output).toContain('({ flag: keep } = obj);')
+      expect(output).toMatchInlineSnapshot(`"({ flag: DEBUG } = obj); ({ flag: keep } = obj);"`)
+    })
+
+    it('drops trailing trivia from value text', () => {
+      const output = transpile('const x = FLAG / 2', { define: { FLAG: '1 //c' } })
+      expect(output).toContain('1 / 2')
+      expect(output).not.toContain('//c')
+      expect(output).toMatchInlineSnapshot(`"const x = 1 / 2"`)
+    })
+
+    it('never emits a directive from a statement-position string', () => {
+      const output = transpile(['FLAG', 'const a = 1'].join('\n'), {
+        define: { FLAG: '"use strict"' },
+      })
+      expect(output).toContain('("use strict")')
+      expect(output).toMatchInlineSnapshot(`
+        "("use strict")
+        const a = 1"
+      `)
+    })
+
+    it('replaces undefined even where a parameter shadows the name', () => {
+      const output = transpile('function f(undefined) { return FLAG }', {
+        define: { FLAG: 'undefined' },
+      })
+      expect(output).toContain('return void 0')
+      expect(output).toMatchInlineSnapshot(`"function f(undefined) { return void 0 }"`)
+    })
+
+    it('reads a local through an entity value like esbuild (NaN shadow)', () => {
+      // esbuild resolves the entity through its symbol table too: a local
+      // binding of the same name wins
+      const output = transpile('function f(NaN) { return FLAG }', {
+        define: { FLAG: 'NaN' },
+      })
+      expect(output).toContain('return NaN')
+      expect(output).toMatchInlineSnapshot(`"function f(NaN) { return NaN }"`)
     })
 
     it('reads all value shapes and guards their writes (TestDefineAssignWarning)', () => {

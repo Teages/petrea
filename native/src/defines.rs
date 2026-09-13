@@ -16,6 +16,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::Expression;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
+use oxc_span::GetSpan;
 
 /// The root of a define key (and of a member chain matched against it).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,16 +29,25 @@ pub(crate) enum ChainRoot {
     ImportMeta,
 }
 
-/// One validated replacement: the splice text (user spelling, trimmed) plus
-/// the root of an entity value — `None` for literals.
+/// One validated replacement: the splice text plus the root of an entity
+/// value — `None` for literals.
 pub(crate) struct DefineValue {
+    /// the expression's own source slice — the user's spelling of the value,
+    /// with any surrounding trivia (including trailing comments) excluded
     pub(crate) text: String,
     /// a `NumericLiteral` — must not fuse with a following `.` member
     /// (`42.x` would lex as `42.` + `x`), so a space is appended
     pub(crate) numeric: bool,
+    /// a `StringLiteral` — spliced as a whole expression statement it would
+    /// become a directive, so it gets parenthesized
+    pub(crate) string: bool,
     /// entity values carry their root; an identifier root may need
     /// qualification through an enum member scope
     pub(crate) root: Option<ChainRoot>,
+    /// an entity with at least one property segment (`obj.method`): as a
+    /// call or template tag its receiver would change, so it is spliced
+    /// detached — `(0, obj.method)()`
+    pub(crate) dotted: bool,
     /// whether a write target may take this value: identifiers and dotted
     /// chains yes (`DEBUG = x`, `this.foo = x`), literals and bare `this`/
     /// `import.meta` no — mirroring esbuild's identifier-or-dot rule
@@ -80,6 +90,15 @@ impl Defines {
 
     pub(crate) fn import_meta(&self) -> Option<&DefineValue> {
         self.import_meta_define.map(|i| &self.values[i as usize])
+    }
+
+    /// The longest multi-segment key ending in `tail`, if any — the chain
+    /// builder stops after that many segments, and callers with no candidate
+    /// for their outermost property skip chain building entirely.
+    pub(crate) fn max_dotted_chain(&self, tail: &str) -> Option<usize> {
+        self.dotted
+            .get(tail)
+            .and_then(|entries| entries.iter().map(|entry| entry.segments.len()).max())
     }
 
     /// The value a member chain maps to. `chain` holds the property names
@@ -190,16 +209,36 @@ fn parse_value(value: &str, allocator: &Allocator) -> Result<DefineValue, String
     let parsed = Parser::new(allocator, trimmed, SourceType::mjs().with_module(true))
         .parse_expression()
         .map_err(|_| invalid.clone())?;
-    let numeric = matches!(parsed, Expression::NumericLiteral(_));
     let root = entity_root(&parsed).ok_or_else(|| invalid.clone())?;
+    let numeric = matches!(parsed, Expression::NumericLiteral(_));
+    let string = matches!(parsed, Expression::StringLiteral(_));
+    let depth = chain_depth(&parsed);
     // identifiers and dotted chains are assignable; bare `this`/`import.meta`
     // and literals are not
-    let assignable = root.is_some()
-        && (matches!(root, Some(ChainRoot::Ident(_))) || chain_depth(&parsed) > 0);
+    let assignable =
+        root.is_some() && (matches!(root, Some(ChainRoot::Ident(_))) || depth > 0);
+    // `undefined` resolves to EUndefined in esbuild — never a local binding
+    // — and the shadow-immune spelling of that is `void 0`
+    if matches!(&root, Some(ChainRoot::Ident(name)) if name == "undefined") {
+        return Ok(DefineValue {
+            text: "void 0".to_string(),
+            numeric: false,
+            string: false,
+            root: None,
+            dotted: false,
+            assignable: false,
+        });
+    }
+    // the expression's own slice: surrounding trivia (including trailing
+    // comments, which the parser accepts) must never be spliced
+    let span = parsed.span();
+    let text = trimmed[span.start as usize..span.end as usize].to_string();
     Ok(DefineValue {
-        text: trimmed.to_string(),
+        text,
         numeric,
+        string,
         root,
+        dotted: depth > 0,
         assignable,
     })
 }
@@ -271,6 +310,11 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(defines.identifier("a").unwrap().text, "true");
+        // `undefined` canonicalizes to the shadow-immune `void 0`
+        assert_eq!(defines.identifier("h").unwrap().text, "void 0");
+        assert!(!defines.identifier("h").unwrap().assignable);
+        assert!(defines.identifier("w").unwrap().dotted);
+        assert!(!defines.identifier("v").unwrap().dotted);
         assert!(defines.identifier("c").unwrap().numeric);
         assert_eq!(
             defines.identifier("g").unwrap().root,
@@ -289,6 +333,12 @@ mod tests {
         assert!(defines.dotted(&["j"], &ChainRoot::Ident("i".into())).is_none());
         assert!(defines.dotted(&["k", "j"], &ChainRoot::This).is_none());
         // a bracket-spelled key matches a dot-spelled chain and vice versa
+        // trailing comments in the value text are dropped with the trivia
+        assert_eq!(build(&[("c", "1 //c")]).unwrap().identifier("c").unwrap().text, "1");
+        assert_eq!(
+            build(&[("c", "\"s\" /*t*/")]).unwrap().identifier("c").unwrap().text,
+            "\"s\""
+        );
         let bracket = build(&[("x.y[\"z\"]", "true")]).unwrap();
         assert!(bracket.dotted(&["z", "y"], &ChainRoot::Ident("x".into())).is_some());
         assert!(bracket.dotted(&["z"], &ChainRoot::Ident("x".into())).is_none());
