@@ -441,16 +441,306 @@ describe('define', () => {
       expect(() => transpile('console.log(1)', { define: { 'a b': '1' } })).toThrow()
     })
 
-    it('rejects this and import.meta roots', () => {
-      expect(() => transpile('console.log(1)', { define: { 'this.x': '1' } })).toThrow()
-      expect(() => transpile('console.log(1)', { define: { 'import.meta.env': '1' } })).toThrow()
-    })
-
     it('rejects values that are not literals or entity names', () => {
       expect(() => transpile('console.log(1)', { define: { x: '1 + 2' } })).toThrow()
       expect(() => transpile('console.log(1)', { define: { x: 'foo()' } })).toThrow()
       expect(() => transpile('console.log(1)', { define: { x: '{ a: 1 }' } })).toThrow()
       expect(() => transpile('console.log(1)', { define: { x: '' } })).toThrow()
+    })
+  })
+
+  /**
+   * Cases migrated from esbuild's own suites (internal/bundler_tests and
+   * scripts/js-api-tests.js), with expectations re-derived for a
+   * position-preserving stripper: identical replacements, but no folding
+   * (`typeof` stays), no lowering (top-level `this` in ESM stays, parens
+   * stay), no injection (compound values are rejected).
+   */
+  describe('esbuild parity', () => {
+    it('replaces top-level this and its chains, skipping nested this (TestDefineThis)', () => {
+      const define = { 'this': '1', 'this.foo': '2', 'this.foo.bar': '3' } as Record<string, string>
+      const block = [
+        'ok(',
+        '  this, this.foo, this.foo.bar,',
+        '  this.foo.baz,',
+        '  this.bar,',
+        ')',
+      ].join('\n')
+      const output = transpile([block, '(() => {', block, '})()', '(function () {', block.replace(/ok/g, 'no'), '})()'].join('\n'), { define })
+      expect(output).toContain('2 .baz')
+      expect(output).toContain('1 .bar')
+      // only the function-nested block keeps its `this` forms (five of them)
+      expect(output.match(/\bthis\b/g)).toHaveLength(5)
+      expect(output).toMatchInlineSnapshot(`
+        "ok(
+          1, 2, 3,
+          2 .baz,
+          1 .bar,
+        )
+        (() => {
+        ok(
+          1, 2, 3,
+          2 .baz,
+          1 .bar,
+        )
+        })()
+        (function () {
+        no(
+          this, this.foo, this.foo.bar,
+          this.foo.baz,
+          this.bar,
+        )
+        })()"
+      `)
+    })
+
+    it('replaces import.meta chains with prefix matching (TestDefineImportMeta)', () => {
+      const output = transpile(
+        [
+          'console.log(',
+          '  import.meta, import.meta.foo, import.meta.foo.bar,',
+          '  import.meta.foo.baz,',
+          '  import.meta.bar,',
+          ')',
+        ].join('\n'),
+        { define: { 'import.meta': '1', 'import.meta.foo': '2', 'import.meta.foo.bar': '3' } },
+      )
+      expect(output).toContain('2 .baz')
+      expect(output).toContain('1 .bar')
+      expect(output).not.toContain('import.meta')
+      expect(output).toMatchInlineSnapshot(`
+        "console.log(
+          1, 2, 3,
+          2 .baz,
+          1 .bar,
+        )"
+      `)
+    })
+
+    it('replaces this and import.meta as values (defineThis / defineImportMetaESM)', () => {
+      const asValue = transpile('console.log(a, b); export {}', {
+        define: { a: 'this', b: 'this.foo' },
+      })
+      expect(asValue).toContain('console.log(this, this.foo)')
+      expect(asValue).toMatchInlineSnapshot(`"console.log(this, this.foo); export {}"`)
+
+      const metaValue = transpile('console.log(a, b); export {}', {
+        define: { a: 'import.meta', b: 'import.meta.foo' },
+      })
+      expect(metaValue).toContain('console.log(import.meta, import.meta.foo)')
+      expect(metaValue).toMatchInlineSnapshot(`"console.log(import.meta, import.meta.foo); export {}"`)
+    })
+
+    it('matches bracket-spelled keys against every chain spelling (defineQuotedPropertyName)', () => {
+      const forms = 'foo(x[\'y\'].z, x.y[\'z\'], x[\'y\'][\'z\'])'
+      for (const key of ['x.y.z', 'x["y"].z', 'x.y["z"]', 'x["y"][\'z\']']) {
+        expect(transpile(forms, { define: { [key]: 'true' } })).toContain('foo(true, true, true)')
+      }
+      const metaForms = 'foo(import.meta[\'y\'].z, import.meta.y[\'z\'], import.meta[\'y\'][\'z\'])'
+      for (const key of ['import.meta["y"].z', 'import.meta.y["z"]', 'import.meta["y"]["z"]']) {
+        expect(transpile(metaForms, { define: { [key]: 'true' } })).toContain('foo(true, true, true)')
+      }
+      expect(
+        transpile('foo(process.env[\'SOME-TEST-VAR\'])', {
+          define: { 'process.env["SOME-TEST-VAR"]': 'true' },
+        }),
+      ).toContain('foo(true)')
+    })
+
+    it('matches all four spellings of the NODE_ENV chain (defineProcessEnvNodeEnv)', () => {
+      const define = { 'process.env.NODE_ENV': '"something"' }
+      for (const form of [
+        'process.env.NODE_ENV',
+        'process.env[\'NODE_ENV\']',
+        'process[\'env\'].NODE_ENV',
+        'process[\'env\'][\'NODE_ENV\']',
+      ]) {
+        const output = transpile(`console.log(${form})`, { define })
+        expect(output).toContain('console.log("something")')
+      }
+    })
+
+    it('splices built-in constant names without folding typeof (defineBuiltInConstants)', () => {
+      const output = transpile('console.log([typeof a, typeof b, typeof c, typeof d, typeof e])', {
+        define: { a: 'NaN', b: 'Infinity', c: 'undefined', d: 'something', e: 'null' },
+      })
+      expect(output).toContain('typeof NaN')
+      expect(output).toContain('typeof undefined')
+      expect(output).toContain('typeof null')
+      expect(output).not.toContain('"number"')
+      expect(output).toMatchInlineSnapshot(`"console.log([typeof NaN, typeof Infinity, typeof undefined, typeof something, typeof null])"`)
+    })
+
+    it('splices BigInt values verbatim (defineBigInt)', () => {
+      const output = transpile('console.log(a)', { define: { a: '0n' } })
+      expect(output).toContain('console.log(0n)')
+      expect(output).toMatchInlineSnapshot(`"console.log(0n)"`)
+    })
+
+    it('replaces the full optional-chain matrix (TestDefineOptionalChain)', () => {
+      const output = transpile(
+        [
+          'console.log([',
+          '  a.b.c,',
+          '  a?.b.c,',
+          '  a.b?.c,',
+          '], [',
+          '  a[\'b\'][\'c\'],',
+          '  a?.[\'b\'][\'c\'],',
+          '  a[\'b\']?.[\'c\'],',
+          '], [',
+          '  a[b][c],',
+          '  a?.[b][c],',
+          '  a[b]?.[c],',
+          '])',
+        ].join('\n'),
+        { define: { 'a.b.c': '1' } },
+      )
+      expect(output.match(/ {2}1,/g)).toHaveLength(6)
+      expect(output).toContain('a[b][c],')
+      expect(output).toContain('a?.[b][c],')
+      expect(output).toContain('a[b]?.[c],')
+      expect(output).toMatchInlineSnapshot(`
+        "console.log([
+          1,
+          1,
+          1,
+        ], [
+          1,
+          1,
+          1,
+        ], [
+          a[b][c],
+          a?.[b][c],
+          a[b]?.[c],
+        ])"
+      `)
+    })
+
+    it('substitutes inside every optional/call/delete form (Issue3551, identifier define)', () => {
+      const output = transpile(
+        [
+          'x?.y.z;',
+          '(x?.y).z;',
+          'x?.y["z"];',
+          '(x?.y)["z"];',
+          'x?.y();',
+          '(x?.y)();',
+          'x?.y.z();',
+          '(x?.y).z();',
+          'x?.y["z"]();',
+          '(x?.y)["z"]();',
+          'delete x?.y.z;',
+          'delete (x?.y).z;',
+          'delete x?.y["z"];',
+          'delete (x?.y)["z"];',
+        ].join('\n'),
+        { define: { x: '1' } },
+      )
+      expect(output).toContain('1?.y.z;')
+      expect(output).toContain('(1?.y)();')
+      expect(output).toContain('delete 1?.y.z;')
+      expect(output).not.toContain(' x')
+      expect(output).toMatchInlineSnapshot(`
+        "1?.y.z;
+        (1?.y).z;
+        1?.y["z"];
+        (1?.y)["z"];
+        1?.y();
+        (1?.y)();
+        1?.y.z();
+        (1?.y).z();
+        1?.y["z"]();
+        (1?.y)["z"]();
+        delete 1?.y.z;
+        delete (1?.y).z;
+        delete 1?.y["z"];
+        delete (1?.y)["z"];"
+      `)
+    })
+
+    it('substitutes the defined prefix of optional/call/delete chains (Issue3551, dot define)', () => {
+      const output = transpile(
+        [
+          'a?.b.c;',
+          '(a?.b).c;',
+          'a?.b["c"];',
+          '(a?.b)["c"];',
+          'a?.b();',
+          '(a?.b)();',
+          'a?.b.c();',
+          '(a?.b).c();',
+          'a?.b["c"]();',
+          '(a?.b)["c"]();',
+          'delete a?.b.c;',
+          'delete (a?.b).c;',
+          'delete a?.b["c"];',
+          'delete (a?.b)["c"];',
+        ].join('\n'),
+        { define: { 'a.b': '1' } },
+      )
+      expect(output).toContain('1 .c;')
+      expect(output).toContain('1["c"];')
+      expect(output).toContain('1();')
+      expect(output).toContain('(1).c;')
+      expect(output).toContain('delete 1 .c;')
+      expect(output).not.toContain('a?.b')
+      expect(output).toMatchInlineSnapshot(`
+        "1 .c;
+        (1).c;
+        1["c"];
+        (1)["c"];
+        1();
+        (1)();
+        1 .c();
+        (1).c();
+        1["c"]();
+        (1)["c"]();
+        delete 1 .c;
+        delete (1).c;
+        delete 1["c"];
+        delete (1)["c"];"
+      `)
+    })
+
+    it('never re-resolves forwarded entity values (Issue2407)', () => {
+      const output = transpile(['a.b()', 'x.y()'].join('\n'), {
+        define: { 'a.b': 'b.c', 'b.c': 'c.a', 'c.a': 'a.b', 'x.y': 'y' },
+      })
+      expect(output).toContain('b.c()')
+      expect(output).toContain('y()')
+      expect(output).toMatchInlineSnapshot(`
+        "b.c()
+        y()"
+      `)
+    })
+
+    it('reads all value shapes and guards their writes (TestDefineAssignWarning)', () => {
+      const define = {
+        'a': 'null',
+        'b.c': 'null',
+        'd': 'ident',
+        'e.f': 'ident',
+        'g': 'dot.chain',
+        'h.i': 'dot.chain',
+      }
+      const read = transpile(
+        'console.log([a, b.c, b["c"]], [d, e.f, e["f"]], [g, h.i, h["i"]])',
+        { define },
+      )
+      expect(read).toContain('[null, null, null]')
+      expect(read).toContain('[ident, ident, ident]')
+      expect(read).toContain('[dot.chain, dot.chain, dot.chain]')
+      expect(read).toMatchInlineSnapshot(`"console.log([null, null, null], [ident, ident, ident], [dot.chain, dot.chain, dot.chain])"`)
+
+      const write = transpile(
+        'console.log([a = 0, b.c = 0, b["c"] = 0], [d = 0, e.f = 0, e["f"] = 0], [g = 0, h.i = 0, h["i"] = 0])',
+        { define },
+      )
+      expect(write).toContain('[a = 0, b.c = 0, b["c"] = 0]')
+      expect(write).toContain('[ident = 0, ident = 0, ident = 0]')
+      expect(write).toContain('[dot.chain = 0, dot.chain = 0, dot.chain = 0]')
+      expect(write).toMatchInlineSnapshot(`"console.log([a = 0, b.c = 0, b["c"] = 0], [ident = 0, ident = 0, ident = 0], [dot.chain = 0, dot.chain = 0, dot.chain = 0])"`)
     })
   })
 
