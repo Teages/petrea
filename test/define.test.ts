@@ -947,6 +947,34 @@ describe('define', () => {
       ).toContain('<this.X/>')
     })
 
+    it('judges JSX prefix splices on the full tag, and drops the tag this-barrier (audit round 11)', () => {
+      // a kept property suffix keeps the result a member tag — a component
+      // reference regardless of case; only whole-name splices judge the
+      // bare value text
+      expect(transpile('<FLAG.X.Y/>', { define: { 'FLAG.X': 'component' }, lang: 'tsx' as never })).toContain('<component.Y/>')
+      expect(transpile('<FLAG.X.Y/>', { define: { 'FLAG.X': 'this' }, lang: 'tsx' as never })).toContain('<this.Y/>')
+      const warns: string[] = []
+      expect(transpile('<FLAG.X/>', {
+        define: { 'FLAG.X': 'component' },
+        lang: 'tsx' as never,
+        onWarn: w => warns.push(w.type),
+      })).toContain('<FLAG.X/>')
+      expect(warns).toEqual(['define-jsx-tag'])
+
+      // esbuild replaces `<this.X />` tags inside functions too — its JSX
+      // lowering runs ahead of the this-nesting check; ordinary this.X
+      // expressions keep the barrier
+      expect(
+        transpile('function f() { return <this.X/> }', {
+          define: { 'this.X': 'Comp' },
+          lang: 'tsx' as never,
+        }),
+      ).toContain('return <Comp/>')
+      expect(
+        transpile('function f() { return this.X }', { define: { 'this.X': 'Comp' } }),
+      ).toContain('return this.X')
+    })
+
     it('reports warning offsets in UTF-16 units (audit round 9)', () => {
       const warnings: Array<{ start: number, end: number }> = []
       const output = transpile('const x=\"中\"; <FLAG />', {

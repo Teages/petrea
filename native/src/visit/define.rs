@@ -103,15 +103,14 @@ impl<'a> Walker<'a> {
             }
         }
         // scope guards before any splice: identifier roots resolve like
-        // anywhere else, `this` roots only exist at top level
-        match &root {
-            ChainRoot::Ident(name)
-                if self.define_shadowed(idx, name) || self.inside_with(idx) =>
-            {
-                return false
-            }
-            ChainRoot::This if self.this_is_nested(idx) => return false,
-            _ => {}
+        // anywhere else. `this` roots carry no nested barrier *in a JSX
+        // tag* — esbuild replaces `<this.X />` inside functions too (its
+        // JSX lowering runs ahead of the this-nesting check); ordinary
+        // `this.X` expressions keep the barrier
+        if let ChainRoot::Ident(name) = &root
+            && (self.define_shadowed(idx, name) || self.inside_with(idx))
+        {
+            return false;
         }
         // longest prefix first
         for take in (1..=links.len()).rev() {
@@ -121,10 +120,14 @@ impl<'a> Walker<'a> {
             };
             let end = self.node_kind(links[take - 1].0).span().end;
             let span = Span::new(self.node_kind(idx).span().start, end);
-            // JSX safety for a whole-name splice is judged on the *result*
-            // shape: a bare lowercase value would flip the tag to an
-            // intrinsic, literals and escapes cannot be tags at all
-            let result_flips = !value.text.contains('.')
+            // when the splice keeps a property suffix the result stays a
+            // member tag — a component reference regardless of case; only a
+            // whole-name splice is judged on the value text alone, where a
+            // bare lowercase (or bare `this`) result flips to an intrinsic
+            // and literals/escapes cannot be tags at all
+            let whole_name = take == links.len();
+            let result_flips = whole_name
+                && !value.text.contains('.')
                 && value.text.starts_with(|c: char| c.is_ascii_lowercase());
             if !matches!(value.root, Some(ChainRoot::Ident(_)) | Some(ChainRoot::This))
                 || value.text.contains('\\')
