@@ -234,19 +234,21 @@ fn parse_value(value: &str, allocator: &Allocator) -> Result<DefineValue, String
     }
     let negative = false;
     let root = entity_root(&parsed).ok_or_else(|| invalid.clone())?;
-    // a member chain must bottom out at an identifier, `this` or
-    // `import.meta` — esbuild's entity check rejects `1 .x`, and a literal
-    // root is not an entity
-    if root.is_none() && chain_depth(&parsed) > 0 {
+    // a member chain must bottom out at an identifier, `this`, `import.meta`
+    // — or `null`, a keyword exception esbuild's entity grammar allows
+    // (`null.x` splices verbatim); other literal roots (`1 .x`) are not
+    // entities
+    let depth = chain_depth(&parsed);
+    let null_rooted = depth > 0 && root_is_null(&parsed);
+    if root.is_none() && depth > 0 && !null_rooted {
         return Err(invalid);
     }
     let numeric = negative || matches!(parsed, Expression::NumericLiteral(_));
     let string = matches!(parsed, Expression::StringLiteral(_));
-    let depth = chain_depth(&parsed);
-    // identifiers and dotted chains are assignable; bare `this`/`import.meta`
-    // and literals are not
-    let assignable =
-        root.is_some() && (matches!(root, Some(ChainRoot::Ident(_))) || depth > 0);
+    // identifiers and dotted chains are assignable — including `null.x`,
+    // a dot chain to esbuild; bare `this`/`import.meta` and literals are not
+    let assignable = null_rooted
+        || (root.is_some() && (matches!(root, Some(ChainRoot::Ident(_))) || depth > 0));
     // `undefined` resolves to EUndefined in esbuild — never a local binding
     // — and the shadow-immune spelling of that is `void 0`, also when the
     // value chains off it: `undefined.x` is `(void 0).x` there
@@ -329,6 +331,17 @@ fn root_span(expression: &Expression<'_>) -> oxc_span::Span {
         Expression::StaticMemberExpression(member) => root_span(&member.object),
         Expression::ComputedMemberExpression(member) => root_span(&member.object),
         other => other.span(),
+    }
+}
+
+/// Whether a member chain bottoms out at `null` — the one literal root
+/// esbuild's entity grammar accepts.
+fn root_is_null(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::StaticMemberExpression(member) => root_is_null(&member.object),
+        Expression::ComputedMemberExpression(member) => root_is_null(&member.object),
+        Expression::NullLiteral(_) => true,
+        _ => false,
     }
 }
 

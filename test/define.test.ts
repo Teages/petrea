@@ -1007,13 +1007,20 @@ describe('define', () => {
       // indirect eval evaluates in global scope: `secret` is invisible there
       expect(globalThis.result).toBe('undefined')
 
+      // an *identifier* call splices bare: esbuild keeps it a direct eval
+      // (verified: "number"), and `eval: 'eval'` never changes its own call
       const identifier = transpile(
         'function g() { const s = 1; return call("typeof s") }\nglobalThis.result = g()',
         { define: { call: 'eval' } },
       )
-      expect(identifier).toContain('(0, eval)')
+      expect(identifier).toContain('return eval(')
       new Function(identifier)()
-      expect(globalThis.result).toBe('undefined')
+      expect(globalThis.result).toBe('number')
+      expect(transpile('eval("1+1")', { define: { eval: 'eval' } })).toContain('eval("1+1")')
+    })
+
+    it('accepts null-rooted chains like esbuild (audit round 15)', () => {
+      expect(transpile('log(x)', { define: { x: 'null.x' } })).toContain('log(null.x)')
     })
 
     it('rejects member chains rooted at a literal (audit round 14)', () => {

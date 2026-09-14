@@ -281,6 +281,17 @@ impl<'a> Walker<'a> {
         }
         let (root_idx, root_name, root_kind) = root;
         let span = self.node_kind(idx).span();
+        // the full key must match before any scope work: inputs whose
+        // members merely share a tail with a key would otherwise resolve —
+        // and memoize — bindings for names that never substitute
+        let root = match root_kind {
+            ChainRootKind::Ident => {
+                ChainRoot::Ident(root_name.expect("identifier root").to_string())
+            }
+            ChainRootKind::This => ChainRoot::This,
+            ChainRootKind::ImportMeta => ChainRoot::ImportMeta,
+        };
+        let Some(value) = defines.dotted(&chain, &root) else { return false };
         // identifier roots resolve through the scope model; a `this` root
         // only exists at top level
         let root_blocked = match root_kind {
@@ -291,14 +302,6 @@ impl<'a> Walker<'a> {
             ChainRootKind::This => self.this_is_nested(root_idx),
             ChainRootKind::ImportMeta => false,
         };
-        let root = match root_kind {
-            ChainRootKind::Ident => {
-                ChainRoot::Ident(root_name.expect("identifier root").to_string())
-            }
-            ChainRootKind::This => ChainRoot::This,
-            ChainRootKind::ImportMeta => ChainRoot::ImportMeta,
-        };
-        let Some(value) = defines.dotted(&chain, &root) else { return false };
         if root_blocked || self.define_blocked(idx, span, value) {
             return false;
         }
@@ -340,12 +343,7 @@ impl<'a> Walker<'a> {
         if parent == u32::MAX || !self.is_call_or_tag_callee(top, parent) {
             return (text, span);
         }
-        // a bare `eval` value in call position must stay indirect — direct
-        // eval would evaluate in the enclosing scope instead of global
-        let bare_eval = !value.dotted
-            && matches!(&value.root, Some(ChainRoot::Ident(name)) if name == "eval")
-            && matches!(self.name_binding(idx, "eval"), NameBinding::Global);
-        if !value.dotted && !bare_eval {
+        if !value.dotted {
             return (text, span);
         }
         // claiming the wrapper span requires every link to be a plain paren;
