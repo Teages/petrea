@@ -56,6 +56,15 @@ impl<'a> Walker<'a> {
             self.blanker.warn("define-jsx-tag", span);
             return;
         }
+        // a decorator head takes a dotted identifier chain, optionally
+        // called — anything else wraps the whole head in parentheses
+        if let Some((target, spliced)) = self.decorator_head_splice(idx, span, &text)
+        {
+            self.blanker
+                .output
+                .override_range_sorted(target.start, target.end, spliced);
+            return;
+        }
         // shorthand positions share one token for key and value: replacing
         // in place would corrupt the key, so the splice expands to
         // `name: value` — object literals (`{ x }`) and destructuring
@@ -72,6 +81,10 @@ impl<'a> Walker<'a> {
         };
         // a destructured value is a write target — receiver detachment and
         // directive wrapping never apply inside it
+        // an enum-member qualification makes the splice a receiver-bearing
+        // chain even when the value itself is a bare name
+        let enum_qualified = matches!(&value.root, Some(ChainRoot::Ident(root))
+            if matches!(self.name_binding(idx, root), NameBinding::EnumMember(_)));
         let (text, target) = if shorthand {
             // `{__proto__}` is an own data property, but the plain
             // `__proto__:` spelling sets the prototype instead — the object
@@ -86,7 +99,7 @@ impl<'a> Walker<'a> {
             };
             (expansion, span)
         } else {
-            self.detached(idx, span, value, text)
+            self.detached(idx, span, value.dotted || enum_qualified, text)
         };
         let mut text = self.wrap_directive(idx, value, text);
         // `for (async of xs)` is a syntax error (the head would parse as an
@@ -243,7 +256,14 @@ impl<'a> Walker<'a> {
         // `this(...)` could never have been the identifier `eval`, so a bare
         // global `eval` value must splice as an indirect call
         let spliced = self.indirect_if_bare_eval(idx, value, spliced);
-        let (text, target) = self.detached(idx, span, value, spliced);
+        if let Some((target, text)) = self.decorator_head_splice(idx, span, &spliced)
+        {
+            self.blanker
+                .output
+                .override_range_sorted(target.start, target.end, text);
+            return;
+        }
+        let (text, target) = self.detached(idx, span, value.dotted, spliced);
         let text = self.wrap_directive(idx, value, text);
         self.blanker
             .output
@@ -261,7 +281,14 @@ impl<'a> Walker<'a> {
         // as with `this(...)`: `import.meta(...)` was never the identifier
         // `eval`, so a bare global `eval` value stays an indirect call
         let spliced = self.indirect_if_bare_eval(idx, value, spliced);
-        let (text, target) = self.detached(idx, span, value, spliced);
+        if let Some((target, text)) = self.decorator_head_splice(idx, span, &spliced)
+        {
+            self.blanker
+                .output
+                .override_range_sorted(target.start, target.end, text);
+            return;
+        }
+        let (text, target) = self.detached(idx, span, value.dotted, spliced);
         let text = self.wrap_directive(idx, value, text);
         self.blanker
             .output
@@ -362,9 +389,106 @@ impl<'a> Walker<'a> {
         // it direct — evaluating in the enclosing scope instead of global
         let mut text = self.splice_text(idx, value, span);
         text = self.indirect_if_bare_eval(idx, value, text);
+        if let Some((target, spliced)) = self.decorator_head_splice(idx, span, &text)
+        {
+            self.blanker
+                .output
+                .override_range_sorted(target.start, target.end, spliced);
+            return true;
+        }
         let text = self.wrap_directive(idx, value, text);
+        // `for (async of xs)` is a syntax error — the of-target splice needs
+        // its parentheses back (the bare-identifier path carries the same)
+        let text = {
+            let (top, _) = self.unwrap_up(idx);
+            if let AstKind::ForOfStatement(of) = self.node_kind(self.parent_of(top))
+                && text == "async"
+                && of.left.span().start == self.node_kind(top).span().start
+            {
+                format!("({text})")
+            } else {
+                text
+            }
+        };
         self.blanker.output.override_range_sorted(span.start, span.end, text);
         true
+    }
+
+    /// The decorator whose @-expression head contains this reference — the
+    /// head being the expression after `@`, its member chain, or the callee
+    /// of its single call. Argument positions are ordinary expressions and
+    /// return None.
+    fn decorator_head(&self, idx: u32) -> Option<u32> {
+        let (mut node, mut calls) = (self.unwrap_up(idx).0, 0);
+        loop {
+            let parent = self.parent_of(node);
+            let start = self.node_kind(node).span().start;
+            match self.node_kind(parent) {
+                AstKind::StaticMemberExpression(_)
+                | AstKind::ComputedMemberExpression(_)
+                | AstKind::PrivateFieldExpression(_) => node = parent,
+                AstKind::CallExpression(call)
+                    if calls == 0 && call.callee.span().start == start =>
+                {
+                    calls += 1;
+                    node = parent;
+                }
+                AstKind::Decorator(_) => return Some(node),
+                _ => return None,
+            }
+        }
+    }
+
+    /// A decorator head only parses as a dotted identifier chain, optionally
+    /// called — any other splice shape (literals, `this`, unary values) wraps
+    /// the whole head in parentheses, like esbuild (`@(42)`, `@(42 .x)`,
+    /// `@(42())`); the paren form allows nothing after it, so the call, when
+    /// present, is wrapped with it. Returns the site to override when this
+    /// owns the splice.
+    fn decorator_head_splice(
+        &self,
+        idx: u32,
+        span: Span,
+        text: &str,
+    ) -> Option<(Span, String)> {
+        let head = self.decorator_head(idx)?;
+        let head_span = self.node_kind(head).span();
+        // a plain dotted identifier chain at the chain's base, with only
+        // static members (and at most the head's one call) above, stays bare
+        if is_dotted_identifier_chain(text) && self.chain_above_is_static(idx, head) {
+            return Some((span, text.to_string()));
+        }
+        // rebuild the whole head around our splice — splice_text's own
+        // numeric-space rule already covers a following `.` at this span
+        let mut inner =
+            String::with_capacity((head_span.end - head_span.start) as usize + text.len() + 2);
+        inner.push_str(&self.src[head_span.start as usize..span.start as usize]);
+        inner.push_str(text);
+        inner.push_str(&self.src[span.end as usize..head_span.end as usize]);
+        Some((head_span, format!("({inner})")))
+    }
+
+    /// Whether every link from the spliced node up to the decorator head is
+    /// a static member expression — computed or private links force the
+    /// whole-head parentheses.
+    fn chain_above_is_static(&self, idx: u32, head: u32) -> bool {
+        let mut node = self.unwrap_up(idx).0;
+        loop {
+            if node == head {
+                return true;
+            }
+            let parent = self.parent_of(node);
+            if parent == head {
+                return matches!(
+                    self.node_kind(head),
+                    AstKind::CallExpression(_) | AstKind::StaticMemberExpression(_)
+                );
+            }
+            if !matches!(self.node_kind(parent), AstKind::StaticMemberExpression(_)) {
+                return false;
+            }
+            node = parent;
+        }
     }
 
     /// The receiver-detaching splice for an identifier-position reference
@@ -375,7 +499,7 @@ impl<'a> Walker<'a> {
         &mut self,
         idx: u32,
         span: Span,
-        value: &DefineValue,
+        dotted: bool,
         text: String,
     ) -> (String, Span) {
         let (top, only_parens) = self.unwrap_up(idx);
@@ -383,7 +507,7 @@ impl<'a> Walker<'a> {
         if parent == u32::MAX || !self.is_call_or_tag_callee(top, parent) {
             return (text, span);
         }
-        if !value.dotted {
+        if !dotted {
             return (text, span);
         }
         // claiming the wrapper span requires every link to be a plain paren;
@@ -515,9 +639,7 @@ impl<'a> Walker<'a> {
                 .heritage
                 .as_ref()
                 .is_some_and(|h| h.expression.span().start == start),
-            // a decorator takes a LeftHandSideExpression too: `@-1` is a
-            // syntax error, `@(-1)` is not
-            AstKind::Decorator(decorator) => decorator.expression.span().start == start,
+
             // a call callee: `void 0?.(x)` parses as `void (0?.(x))` and
             // loses the optional call's short-circuit; `(void 0)?.(x)` keeps
             // it, which is how a stripper without esbuild's dead-code
@@ -751,10 +873,15 @@ impl<'a> Walker<'a> {
             }
             match self.node_kind(parent) {
                 AstKind::Function(_) | AstKind::StaticBlock(_) => return true,
-                // decorators run at class-definition time and evaluate in the
-                // enclosing scope — a `this` inside one is the outer this,
-                // never the instance's, so the walk is already answered
-                AstKind::Decorator(_) => return false,
+                // decorators run at class-definition time in the scope
+                // enclosing the decorated member — skip that member's own
+                // instance barrier (and the class's) and keep walking: a
+                // class decorated inside a function still sees that
+                // function's `this`
+                AstKind::Decorator(_) => {
+                    idx = self.parent_of(parent);
+                    continue;
+                }
                 AstKind::AccessorProperty(node) => {
                     // same rule as fields: an initializer gets the instance
                     // `this`, a computed key evaluates in the enclosing one
@@ -912,6 +1039,21 @@ impl<'a> Walker<'a> {
             .is_some()
             .then_some(NameBinding::Local)
     }
+}
+
+/// Whether `text` spells a plain dotted identifier chain — the only shape
+/// a decorator head accepts bare. The first segment must be a real
+/// identifier: the literal keywords (`true`, `null`) and the `this` /
+/// `import` roots spell like one but are not, so those values wrap. Later
+/// segments are property names, where keywords are fine (`a.class`).
+fn is_dotted_identifier_chain(text: &str) -> bool {
+    !text.is_empty()
+        && text.split('.').enumerate().all(|(i, part)| {
+            let mut chars = part.chars();
+            let head_ok = matches!(chars.next(), Some(c) if c.is_alphabetic() || c == '_' || c == '$')
+                && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+            head_ok && (i > 0 || !matches!(part, "true" | "false" | "null" | "this" | "import"))
+        })
 }
 
 /// The wrapped expression of a parenthesized or TS-wrapped expression —
