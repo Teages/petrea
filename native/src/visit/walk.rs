@@ -364,9 +364,14 @@ pub(crate) type FnvBuild = std::hash::BuildHasherDefault<FnvHasher>;
 /// binding whose name a define decision depends on: otherwise every
 /// reference is provably unshadowed and the empty-model fast path in
 /// [`crate::visit::define`] answers every resolution as global.
-fn prepare_enum_tables(walker: &mut Walker<'_>, enum_indices: &[u32], defines_need_model: bool) {
+fn prepare_enum_tables(
+    walker: &mut Walker<'_>,
+    enum_indices: &[u32],
+    defines_need_model: bool,
+    define_name_filter: Option<&[&str]>,
+) {
     walker.parent = derive_parents(&walker.first_child, &walker.next_sibling);
-    let mut collected = enums::collect::collect_enum_declarations(walker, enum_indices);
+    let mut collected = enums::collect::collect_enum_declarations(walker, enum_indices, None);
     if collected.needs_scope_model || defines_need_model {
         walker.node_scope = derive_node_scopes(
             &walker.nodes,
@@ -374,7 +379,7 @@ fn prepare_enum_tables(walker: &mut Walker<'_>, enum_indices: &[u32], defines_ne
             &walker.first_child,
             &walker.next_sibling,
         );
-        collected = enums::collect::collect_enum_declarations(walker, enum_indices);
+        collected = enums::collect::collect_enum_declarations(walker, enum_indices, define_name_filter);
     }
     walker.enum_members = Rc::new(collected.table);
     walker.const_bindings = Rc::new(collected.bindings);
@@ -472,20 +477,33 @@ pub fn blank_program<'a>(
         // regardless (entity values may need enum-member qualification), and
         // so does any file binding a relevant name — the precise shadow walk
         // then runs exactly where it can change an outcome.
+        let mut define_name_filter: Option<Vec<&str>> = None;
         let defines_need_model = match defines {
             Some(defines) if !defines.is_empty() => {
-                let (has_with, relevant_bound) =
-                    scan_define_gates(&walker.nodes, &defines.relevant_roots());
+                let relevant = defines.relevant_roots();
+                let (has_with, relevant_bound) = scan_define_gates(&walker.nodes, &relevant);
                 walker.has_with = has_with;
                 // a bound relevant name needs the precise shadow walk; enums
                 // matter only for entity values, whose splices qualify
                 // through enum member scopes — literal-only defines never
                 // resolve a name and skip the model on enum files too
-                relevant_bound || (!enum_indices.is_empty() && defines.has_entity_values())
+                let need = relevant_bound
+                    || (!enum_indices.is_empty() && defines.has_entity_values());
+                // the registry then serves define resolutions only — names
+                // outside the relevant set never join it
+                if need && enum_indices.is_empty() {
+                    define_name_filter = Some(relevant);
+                }
+                need
             }
             _ => false,
         };
-        prepare_enum_tables(&mut walker, &enum_indices, defines_need_model);
+        prepare_enum_tables(
+            &mut walker,
+            &enum_indices,
+            defines_need_model,
+            define_name_filter.as_deref(),
+        );
     }
     walker.visit_node_array(&indices, true, false);
 
@@ -544,20 +562,33 @@ pub fn blank_program_utf16<'a>(
         // regardless (entity values may need enum-member qualification), and
         // so does any file binding a relevant name — the precise shadow walk
         // then runs exactly where it can change an outcome.
+        let mut define_name_filter: Option<Vec<&str>> = None;
         let defines_need_model = match defines {
             Some(defines) if !defines.is_empty() => {
-                let (has_with, relevant_bound) =
-                    scan_define_gates(&walker.nodes, &defines.relevant_roots());
+                let relevant = defines.relevant_roots();
+                let (has_with, relevant_bound) = scan_define_gates(&walker.nodes, &relevant);
                 walker.has_with = has_with;
                 // a bound relevant name needs the precise shadow walk; enums
                 // matter only for entity values, whose splices qualify
                 // through enum member scopes — literal-only defines never
                 // resolve a name and skip the model on enum files too
-                relevant_bound || (!enum_indices.is_empty() && defines.has_entity_values())
+                let need = relevant_bound
+                    || (!enum_indices.is_empty() && defines.has_entity_values());
+                // the registry then serves define resolutions only — names
+                // outside the relevant set never join it
+                if need && enum_indices.is_empty() {
+                    define_name_filter = Some(relevant);
+                }
+                need
             }
             _ => false,
         };
-        prepare_enum_tables(&mut walker, &enum_indices, defines_need_model);
+        prepare_enum_tables(
+            &mut walker,
+            &enum_indices,
+            defines_need_model,
+            define_name_filter.as_deref(),
+        );
     }
     walker.visit_node_array(&indices, true, false);
 

@@ -66,6 +66,7 @@ pub(crate) struct CollectResult<'a> {
 pub(crate) fn collect_enum_declarations<'a>(
     w: &Walker<'a>,
     enum_indices: &[u32],
+    name_filter: Option<&[&str]>,
 ) -> CollectResult<'a> {
     let mut table: HashMap<(u32, String), EnumMembers> = HashMap::new();
     let mut bindings = ConstBindings {
@@ -122,8 +123,11 @@ pub(crate) fn collect_enum_declarations<'a>(
     } else {
         // the heavy run: every other binding joins the registry, in source
         // order
+        // a define-forced registry (enum-free file, relevant name bound)
+        // answers only define resolutions — names outside the filter never
+        // join, keeping registration proportional to the define table
         for index in 0..w.node_count() {
-            register::register_other_node(w, index as u32, &mut bindings);
+            register::register_other_node(w, index as u32, &mut bindings, name_filter);
         }
     }
 

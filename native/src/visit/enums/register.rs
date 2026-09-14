@@ -66,7 +66,7 @@ pub(super) fn register_enum_declaration<'a>(
             .insert(w.node_scope(idx), group.clone());
         // the enum's own name binds in the statement list around it: a bare
         // reference reads the runtime object, never an outer const
-        bind_shadow(bindings, group_scope, node.id.name.as_str());
+        bind_shadow(bindings, group_scope, node.id.name.as_str(), None);
     }
     Some(EnumRegistration {
         node,
@@ -77,35 +77,51 @@ pub(super) fn register_enum_declaration<'a>(
 
 /// Register one flattened node's non-enum bindings (enums go through
 /// [`register_enum_declaration`]).
-pub(super) fn register_other_node<'a>(w: &Walker<'a>, idx: u32, bindings: &mut ConstBindings<'a>) {
+pub(super) fn register_other_node<'a>(
+    w: &Walker<'a>,
+    idx: u32,
+    bindings: &mut ConstBindings<'a>,
+    filter: Option<&[&str]>,
+) {
     match w.node_kind(idx) {
         AstKind::VariableDeclaration(node) => {
-            register_variable(w, idx, node, bindings);
+            register_variable(w, idx, node, bindings, filter);
         }
         AstKind::TSNamespaceDeclaration(node) => {
-            register_namespace_name(w, idx, node, bindings);
+            register_namespace_name(w, idx, node, bindings, filter);
         }
         AstKind::FormalParameters(_) => {
-            register_parameters(w, idx, bindings);
+            register_parameters(w, idx, bindings, filter);
         }
         AstKind::CatchClause(node) => {
-            register_catch_parameter(w, idx, node, bindings);
+            register_catch_parameter(w, idx, node, bindings, filter);
         }
         AstKind::Function(node) => {
-            register_function_name(w, idx, node, bindings);
+            register_function_name(w, idx, node, bindings, filter);
         }
         AstKind::Class(node) => {
-            register_class_name(w, idx, node, bindings);
+            register_class_name(w, idx, node, bindings, filter);
         }
         AstKind::ImportDeclaration(node) => {
-            register_imports(w, idx, node, bindings);
+            register_imports(w, idx, node, bindings, filter);
         }
         _ => {}
     }
 }
 
-/// Register `name` at `scope` as a shadow (a runtime read hiding any outer const).
-fn bind_shadow<'a>(bindings: &mut ConstBindings<'a>, scope: u32, name: &'a str) {
+/// Register `name` at `scope` as a shadow (a runtime read hiding any outer
+/// const). A define-forced registry answers only relevant-name resolutions,
+/// so a filter drops every other name — inserts stay proportional to the
+/// define table instead of the file's binding count.
+fn bind_shadow<'a>(
+    bindings: &mut ConstBindings<'a>,
+    scope: u32,
+    name: &'a str,
+    filter: Option<&[&str]>,
+) {
+    if filter.is_some_and(|relevant| !relevant.iter().any(|root| *root == name)) {
+        return;
+    }
     bindings
         .bindings
         .entry(scope)
@@ -121,6 +137,7 @@ fn register_function_name<'a>(
     idx: u32,
     node: &'a Function<'a>,
     bindings: &mut ConstBindings<'a>,
+    filter: Option<&[&str]>,
 ) {
     let Some(id) = &node.id else {
         return;
@@ -133,7 +150,7 @@ fn register_function_name<'a>(
             .find(|&child| matches!(w.node_kind(child), AstKind::FormalParameters(_)))
             .map_or(w.node_scope(idx), |child| w.node_scope(child))
     };
-    bind_shadow(bindings, scope, id.name.as_str());
+    bind_shadow(bindings, scope, id.name.as_str(), filter);
 }
 
 /// The class scope covers every member position (methods, field initializers,
@@ -144,6 +161,7 @@ fn register_class_name<'a>(
     idx: u32,
     node: &'a Class<'a>,
     bindings: &mut ConstBindings<'a>,
+    filter: Option<&[&str]>,
 ) {
     let Some(id) = &node.id else {
         return;
@@ -154,9 +172,9 @@ fn register_class_name<'a>(
     } else {
         class_scope
     };
-    bind_shadow(bindings, scope, id.name.as_str());
+    bind_shadow(bindings, scope, id.name.as_str(), filter);
     if node.r#type == ClassType::ClassDeclaration {
-        bind_shadow(bindings, class_scope, id.name.as_str());
+        bind_shadow(bindings, class_scope, id.name.as_str(), filter);
     }
 }
 
@@ -166,6 +184,7 @@ fn register_imports<'a>(
     idx: u32,
     node: &'a ImportDeclaration<'a>,
     bindings: &mut ConstBindings<'a>,
+    filter: Option<&[&str]>,
 ) {
     for specifier in node.specifiers.iter().flatten() {
         let local = match specifier {
@@ -173,7 +192,7 @@ fn register_imports<'a>(
             ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => &s.local,
             ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => &s.local,
         };
-        bind_shadow(bindings, w.node_scope(idx), local.name.as_str());
+        bind_shadow(bindings, w.node_scope(idx), local.name.as_str(), filter);
     }
 }
 
@@ -186,9 +205,10 @@ fn register_namespace_name<'a>(
     idx: u32,
     node: &TSNamespaceDeclaration<'a>,
     bindings: &mut ConstBindings<'a>,
+    filter: Option<&[&str]>,
 ) {
     if !node.declare {
-        bind_shadow(bindings, w.node_scope(idx), node.id.name.as_str());
+        bind_shadow(bindings, w.node_scope(idx), node.id.name.as_str(), filter);
     }
 }
 
@@ -204,6 +224,7 @@ fn register_variable<'a>(
     index: u32,
     node: &'a VariableDeclaration<'a>,
     bindings: &mut ConstBindings<'a>,
+    filter: Option<&[&str]>,
 ) {
     if node.declare {
         return;
@@ -220,31 +241,39 @@ fn register_variable<'a>(
             && declarator.type_annotation.is_none()
             && let Some(initializer) = declarator.init.as_ref()
         {
-            bindings.bindings.entry(scope).or_default().insert(
-                binding_name(&declarator.id),
-                ConstBinding::Decl {
-                    initializer,
-                    scope_chain: scope_chain_of(w, index),
-                },
-            );
+            let name = binding_name(&declarator.id);
+            if filter.is_none_or(|relevant| relevant.iter().any(|root| *root == name)) {
+                bindings.bindings.entry(scope).or_default().insert(
+                    name,
+                    ConstBinding::Decl {
+                        initializer,
+                        scope_chain: scope_chain_of(w, index),
+                    },
+                );
+            }
             continue;
         }
-        collect_pattern_shadows(&declarator.id, scope, bindings);
+        collect_pattern_shadows(&declarator.id, scope, bindings, filter);
     }
 }
 
 /// Function parameters bind in the function's parameter scope (the
 /// FormalParameters node's own scope) — never compile-time constants,
 /// shadowing outer consts for defaults, the body, and everything nested.
-fn register_parameters<'a>(w: &Walker<'a>, index: u32, bindings: &mut ConstBindings<'a>) {
+fn register_parameters<'a>(
+    w: &Walker<'a>,
+    index: u32,
+    bindings: &mut ConstBindings<'a>,
+    filter: Option<&[&str]>,
+) {
     let parameter_scope = w.node_scope(index);
     for child in w.children_of(index) {
         match w.node_kind(child) {
             AstKind::FormalParameter(parameter) => {
-                collect_pattern_shadows(&parameter.pattern, parameter_scope, bindings);
+                collect_pattern_shadows(&parameter.pattern, parameter_scope, bindings, filter);
             }
             AstKind::FormalParameterRest(rest) => {
-                collect_pattern_shadows(&rest.rest.argument, parameter_scope, bindings);
+                collect_pattern_shadows(&rest.rest.argument, parameter_scope, bindings, filter);
             }
             _ => {}
         }
@@ -257,10 +286,11 @@ fn register_catch_parameter<'a>(
     index: u32,
     node: &'a CatchClause<'a>,
     bindings: &mut ConstBindings<'a>,
+    filter: Option<&[&str]>,
 ) {
     let catch_scope = w.node_scope(index);
     if let Some(param) = &node.param {
-        collect_pattern_shadows(&param.pattern, catch_scope, bindings);
+        collect_pattern_shadows(&param.pattern, catch_scope, bindings, filter);
     }
 }
 
@@ -285,29 +315,30 @@ fn collect_pattern_shadows<'a>(
     pattern: &BindingPattern<'a>,
     scope: u32,
     bindings: &mut ConstBindings<'a>,
+    filter: Option<&[&str]>,
 ) {
     match pattern {
         BindingPattern::BindingIdentifier(id) => {
-            bind_shadow(bindings, scope, id.name.as_str());
+            bind_shadow(bindings, scope, id.name.as_str(), filter);
         }
         BindingPattern::ObjectPattern(pattern) => {
             for property in &pattern.properties {
-                collect_pattern_shadows(&property.value, scope, bindings);
+                collect_pattern_shadows(&property.value, scope, bindings, filter);
             }
             if let Some(rest) = &pattern.rest {
-                collect_pattern_shadows(&rest.argument, scope, bindings);
+                collect_pattern_shadows(&rest.argument, scope, bindings, filter);
             }
         }
         BindingPattern::ArrayPattern(pattern) => {
             for element in pattern.elements.iter().flatten() {
-                collect_pattern_shadows(element, scope, bindings);
+                collect_pattern_shadows(element, scope, bindings, filter);
             }
             if let Some(rest) = &pattern.rest {
-                collect_pattern_shadows(&rest.argument, scope, bindings);
+                collect_pattern_shadows(&rest.argument, scope, bindings, filter);
             }
         }
         BindingPattern::AssignmentPattern(pattern) => {
-            collect_pattern_shadows(&pattern.left, scope, bindings);
+            collect_pattern_shadows(&pattern.left, scope, bindings, filter);
         }
     }
 }
