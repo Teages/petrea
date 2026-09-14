@@ -25,21 +25,21 @@ describe('define', () => {
         ')',
       ].join('\n')
       const output = transpile([block, '(() => {', block, '})()', '(function () {', block.replace(/ok/g, 'no'), '})()'].join('\n'), { define })
-      expect(output).toContain('2 .baz')
-      expect(output).toContain('1 .bar')
+      expect(output).toContain('2       .baz')
+      expect(output).toContain('1   .bar')
       // only the function-nested block keeps its `this` forms (five of them)
       expect(output.match(/\bthis\b/g)).toHaveLength(5)
       expect(output).toMatchInlineSnapshot(`
         "ok(
-          1, 2, 3,
-          2 .baz,
-          1 .bar,
+          1   , 2       , 3           ,
+          2       .baz,
+          1   .bar,
         )
         (() => {
         ok(
-          1, 2, 3,
-          2 .baz,
-          1 .bar,
+          1   , 2       , 3           ,
+          2       .baz,
+          1   .bar,
         )
         })()
         (function () {
@@ -63,14 +63,14 @@ describe('define', () => {
         ].join('\n'),
         { define: { 'import.meta': '1', 'import.meta.foo': '2', 'import.meta.foo.bar': '3' } },
       )
-      expect(output).toContain('2 .baz')
-      expect(output).toContain('1 .bar')
+      expect(output).toContain('2              .baz')
+      expect(output).toContain('1          .bar')
       expect(output).not.toContain('import.meta')
       expect(output).toMatchInlineSnapshot(`
         "console.log(
-          1, 2, 3,
-          2 .baz,
-          1 .bar,
+          1          , 2              , 3                  ,
+          2              .baz,
+          1          .bar,
         )"
       `)
     })
@@ -92,17 +92,17 @@ describe('define', () => {
     it('matches bracket-spelled keys against every chain spelling (defineQuotedPropertyName)', () => {
       const forms = 'foo(x[\'y\'].z, x.y[\'z\'], x[\'y\'][\'z\'])'
       for (const key of ['x.y.z', 'x["y"].z', 'x.y["z"]', 'x["y"][\'z\']']) {
-        expect(transpile(forms, { define: { [key]: 'true' } })).toContain('foo(true, true, true)')
+        expect(transpile(forms, { define: { [key]: 'true' } })).toContain('foo(true    , true    , true       )')
       }
       const metaForms = 'foo(import.meta[\'y\'].z, import.meta.y[\'z\'], import.meta[\'y\'][\'z\'])'
       for (const key of ['import.meta["y"].z', 'import.meta.y["z"]', 'import.meta["y"]["z"]']) {
-        expect(transpile(metaForms, { define: { [key]: 'true' } })).toContain('foo(true, true, true)')
+        expect(transpile(metaForms, { define: { [key]: 'true' } })).toContain('foo(true              , true              , true                 )')
       }
       expect(
         transpile('foo(process.env[\'SOME-TEST-VAR\'])', {
           define: { 'process.env["SOME-TEST-VAR"]': 'true' },
         }),
-      ).toContain('foo(true)')
+      ).toContain('foo(true                        )')
     })
 
     it('matches all four spellings of the NODE_ENV chain (defineProcessEnvNodeEnv)', () => {
@@ -114,7 +114,7 @@ describe('define', () => {
         'process[\'env\'][\'NODE_ENV\']',
       ]) {
         const output = transpile(`console.log(${form})`, { define })
-        expect(output).toContain('console.log("something")')
+        expect(output).toContain('console.log("something"')
       }
     })
 
@@ -154,19 +154,19 @@ describe('define', () => {
         ].join('\n'),
         { define: { 'a.b.c': '1' } },
       )
-      expect(output.match(/ {2}1,/g)).toHaveLength(6)
+      expect(output.match(/ {2}1 +,/g)).toHaveLength(6)
       expect(output).toContain('a[b][c],')
       expect(output).toContain('a?.[b][c],')
       expect(output).toContain('a[b]?.[c],')
       expect(output).toMatchInlineSnapshot(`
         "console.log([
-          1,
-          1,
-          1,
+          1    ,
+          1     ,
+          1     ,
         ], [
-          1,
-          1,
-          1,
+          1          ,
+          1            ,
+          1            ,
         ], [
           a[b][c],
           a?.[b][c],
@@ -237,27 +237,27 @@ describe('define', () => {
         ].join('\n'),
         { define: { 'a.b': '1' } },
       )
-      expect(output).toContain('1 .c;')
-      expect(output).toContain('1["c"];')
-      expect(output).toContain('1();')
-      expect(output).toContain('(1).c;')
-      expect(output).toContain('delete 1 .c;')
+      expect(output).toContain('1   .c;')
+      expect(output).toContain('1   ["c"];')
+      expect(output).toContain('1   ();')
+      expect(output).toContain('(1   ).c;')
+      expect(output).toContain('delete 1   .c;')
       expect(output).not.toContain('a?.b')
       expect(output).toMatchInlineSnapshot(`
-        "1 .c;
-        (1).c;
-        1["c"];
-        (1)["c"];
-        1();
-        (1)();
-        1 .c();
-        (1).c();
-        1["c"]();
-        (1)["c"]();
-        delete 1 .c;
-        delete (1).c;
-        delete 1["c"];
-        delete (1)["c"];"
+        "1   .c;
+        (1   ).c;
+        1   ["c"];
+        (1   )["c"];
+        1   ();
+        (1   )();
+        1   .c();
+        (1   ).c();
+        1   ["c"]();
+        (1   )["c"]();
+        delete 1   .c;
+        delete (1   ).c;
+        delete 1   ["c"];
+        delete (1   )["c"];"
       `)
     })
 
@@ -266,10 +266,10 @@ describe('define', () => {
         define: { 'a.b': 'b.c', 'b.c': 'c.a', 'c.a': 'a.b', 'x.y': 'y' },
       })
       expect(output).toContain('b.c()')
-      expect(output).toContain('y()')
+      expect(output).toContain('y  ()')
       expect(output).toMatchInlineSnapshot(`
         "b.c()
-        y()"
+        y  ()"
       `)
     })
 
@@ -313,9 +313,9 @@ describe('define', () => {
 
     it('drops trailing trivia from value text', () => {
       const output = transpile('const x = FLAG / 2', { define: { FLAG: '1 //c' } })
-      expect(output).toContain('1 / 2')
+      expect(output).toContain('1    / 2')
       expect(output).not.toContain('//c')
-      expect(output).toMatchInlineSnapshot(`"const x = 1 / 2"`)
+      expect(output).toMatchInlineSnapshot(`"const x = 1    / 2"`)
     })
 
     it('never emits a directive from a statement-position string', () => {
@@ -344,7 +344,7 @@ describe('define', () => {
         define: { FLAG: 'NaN' },
       })
       expect(output).toContain('return NaN')
-      expect(output).toMatchInlineSnapshot(`"function f(NaN) { return NaN }"`)
+      expect(output).toMatchInlineSnapshot(`"function f(NaN) { return NaN  }"`)
     })
 
     it('parenthesizes void 0 before a following member (audit round 2)', () => {
@@ -399,7 +399,7 @@ describe('define', () => {
       expect(transpile('<FLAG />', { define: { FLAG: 'component' }, lang: 'tsx' as never })).toContain('<FLAG />')
       expect(transpile('<FLAG />', { define: { FLAG: 'Component' }, lang: 'tsx' as never })).toContain('<Component />')
       expect(transpile('<FLAG />', { define: { FLAG: 'Comp.Box' }, lang: 'tsx' as never })).toContain('<Comp.Box />')
-      expect(transpile('<FLAG />', { define: { FLAG: '_C' }, lang: 'tsx' as never })).toContain('<_C />')
+      expect(transpile('<FLAG />', { define: { FLAG: '_C' }, lang: 'tsx' as never })).toContain('<_C   />')
       // member-tag roots are references regardless of case; literals stay out
       expect(transpile('<FLAG.X />', { define: { FLAG: 'component' }, lang: 'tsx' as never })).toContain('<component.X />')
       expect(transpile('<FLAG.X />', { define: { FLAG: '"x"' }, lang: 'tsx' as never })).toContain('<FLAG.X />')
@@ -457,7 +457,7 @@ describe('define', () => {
       expect(warns).toEqual(['define-jsx-tag'])
 
       // the JSX member chain matches dotted keys with the whole tag name
-      expect(transpile('<FLAG.X/>', { define: { 'FLAG.X': 'Comp' }, lang: 'tsx' as never })).toContain('<Comp/>')
+      expect(transpile('<FLAG.X/>', { define: { 'FLAG.X': 'Comp' }, lang: 'tsx' as never })).toContain('<Comp  />')
       expect(transpile('<FLAG.X.Y/>', { define: { 'FLAG.X.Y': 'Comp.Box' }, lang: 'tsx' as never })).toContain('<Comp.Box/>')
       const unsafe: string[] = []
       const literal = transpile('<FLAG.X/>', {
@@ -494,17 +494,17 @@ describe('define', () => {
       `)
 
       // the longest matching prefix wins: FLAG.X under FLAG.X.Y keeps .Y
-      expect(transpile('<FLAG.X.Y/>', { define: { 'FLAG.X': 'Comp' }, lang: 'tsx' as never })).toContain('<Comp.Y/>')
+      expect(transpile('<FLAG.X.Y/>', { define: { 'FLAG.X': 'Comp' }, lang: 'tsx' as never })).toContain('<Comp  .Y/>')
 
       // this-rooted tags match their own keys — inside functions too,
       // per esbuild (audit round 11 dropped the tag this-barrier)
-      expect(transpile('<this.X/>', { define: { 'this.X': 'Comp' }, lang: 'tsx' as never })).toContain('<Comp/>')
+      expect(transpile('<this.X/>', { define: { 'this.X': 'Comp' }, lang: 'tsx' as never })).toContain('<Comp  />')
       expect(
         transpile('function f() { return <this.X/> }', {
           define: { 'this.X': 'Comp' },
           lang: 'tsx' as never,
         }),
-      ).toContain('return <Comp/>')
+      ).toContain('return <Comp  />')
     })
 
     it('judges JSX prefix splices on the full tag, and drops the tag this-barrier (audit round 11)', () => {
@@ -512,7 +512,7 @@ describe('define', () => {
       // reference regardless of case; only whole-name splices judge the
       // bare value text
       expect(transpile('<FLAG.X.Y/>', { define: { 'FLAG.X': 'component' }, lang: 'tsx' as never })).toContain('<component.Y/>')
-      expect(transpile('<FLAG.X.Y/>', { define: { 'FLAG.X': 'this' }, lang: 'tsx' as never })).toContain('<this.Y/>')
+      expect(transpile('<FLAG.X.Y/>', { define: { 'FLAG.X': 'this' }, lang: 'tsx' as never })).toContain('<this  .Y/>')
       const warns: string[] = []
       expect(transpile('<FLAG.X/>', {
         define: { 'FLAG.X': 'component' },
@@ -529,7 +529,7 @@ describe('define', () => {
           define: { 'this.X': 'Comp' },
           lang: 'tsx' as never,
         }),
-      ).toContain('return <Comp/>')
+      ).toContain('return <Comp  />')
       expect(
         transpile('function f() { return this.X }', { define: { 'this.X': 'Comp' } }),
       ).toContain('return this.X')
@@ -547,7 +547,7 @@ describe('define', () => {
           lang: 'tsx' as never,
           onWarn: w => warns.push(w.type),
         }),
-      ).toContain('<E.b/>')
+      ).toContain('<E.b />')
       expect(warns).toEqual([])
       // a bare lowercase splice that stays bare still warns and keeps
       expect(transpile('<FLAG />', { define: { FLAG: 'component' }, lang: 'tsx' as never })).toContain(
@@ -573,14 +573,14 @@ describe('define', () => {
           define: { 'FLAG.X': 'B' },
           lang: 'tsx' as never,
         }),
-      ).toContain('<E.B/>')
+      ).toContain('<E.B   />')
       // prefix matches keep their suffix, still qualified
       expect(
         transpile('enum E { B = obj, C = <FLAG.X.Y/> }', {
           define: { 'FLAG.X': 'B' },
           lang: 'tsx' as never,
         }),
-      ).toContain('<E.B.Y/>')
+      ).toContain('<E.B   .Y/>')
       // the this-rooted variant qualifies too; a qualified lowercase member
       // is a component reference, not an intrinsic flip, so no warning
       const warns: string[] = []
@@ -590,7 +590,7 @@ describe('define', () => {
           lang: 'tsx' as never,
           onWarn: w => warns.push(w.type),
         }),
-      ).toContain('<E.b/>')
+      ).toContain('<E.b   />')
       expect(warns).toEqual([])
     })
 
@@ -704,13 +704,13 @@ describe('define', () => {
       const output = transpile(['[x=FLAG]=[]', '({x=FLAG}={})', '({x:y=FLAG}={})'].join('\n'), {
         define: { FLAG: '1' },
       })
-      expect(output).toContain('[x=1]=[]')
-      expect(output).toContain('({x=1}={})')
-      expect(output).toContain('({x:y=1}={})')
+      expect(output).toContain('[x=1   ]=[]')
+      expect(output).toContain('({x=1   }={})')
+      expect(output).toContain('({x:y=1   }={})')
       expect(output).toMatchInlineSnapshot(`
-        "[x=1]=[]
-        ({x=1}={})
-        ({x:y=1}={})"
+        "[x=1   ]=[]
+        ({x=1   }={})
+        ({x:y=1   }={})"
       `)
     })
 
@@ -726,8 +726,8 @@ describe('define', () => {
       const output = transpile('log(a[("b")]); log(a["b" as string]); log(a.b)', {
         define: { 'a.b': '1' },
       })
-      expect(output).toContain('log(1); log(1); log(1)')
-      expect(output).toMatchInlineSnapshot(`"log(1); log(1); log(1)"`)
+      expect(output).toContain('log(1       ); log(1               ); log(1  )')
+      expect(output).toMatchInlineSnapshot(`"log(1       ); log(1               ); log(1  )"`)
     })
 
     it('lets this and import.meta through a with body (audit round 6)', () => {
@@ -738,7 +738,7 @@ describe('define', () => {
       expect(output).toContain('result=1')
       expect(output).toContain('flag=FLAG')
       expect(output).toContain('meta=1')
-      expect(output).toMatchInlineSnapshot(`"with(obj){result=1; flag=FLAG; meta=1}"`)
+      expect(output).toMatchInlineSnapshot(`"with(obj){result=1     ; flag=FLAG; meta=1              }"`)
     })
 
     it('guards write targets behind TS wrappers (audit round 5)', () => {
@@ -771,7 +771,7 @@ describe('define', () => {
       expect(output).toContain('delete \"x\"')
       expect(output).toMatchInlineSnapshot(`
         "delete FLAG
-        delete "x""
+        delete "x"                 "
       `)
     })
 
@@ -779,8 +779,8 @@ describe('define', () => {
       const output = transpile('log(((a)).b); log(((a.b)).c)', {
         define: { 'a.b': '1', 'a.b.c': '2' },
       })
-      expect(output).toContain('log(1); log(2)')
-      expect(output).toMatchInlineSnapshot(`"log(1); log(2)"`)
+      expect(output).toContain('log(1      ); log(2        )')
+      expect(output).toMatchInlineSnapshot(`"log(1      ); log(2        )"`)
     })
 
     it('resolves computed-key this against the enclosing function (audit round 5)', () => {
@@ -790,10 +790,10 @@ describe('define', () => {
       )
       // inside f the key reads f's `this`; at top level it is the top `this`
       expect(output).toContain('return class { [this.x] = 1 }')
-      expect(output).toContain('class C { [\"top\"] = 1 }')
+      expect(output).toContain('class C { [\"top\" ] = 1 }')
       expect(output).toMatchInlineSnapshot(`
         "function f() { return class { [this.x] = 1 } }
-        class C { ["top"] = 1 }"
+        class C { ["top" ] = 1 }"
       `)
     })
 
@@ -853,11 +853,11 @@ describe('define', () => {
       )
       expect(output).toContain('return FLAG}')
       expect(output).toContain('return FLAG.x}')
-      expect(output).toContain('with(1){}')
+      expect(output).toContain('with(1   ){}')
       expect(output).toMatchInlineSnapshot(`
         "with(obj){return FLAG}
         with(obj){return FLAG.x}
-        with(1){}"
+        with(1   ){}"
       `)
     })
 
@@ -869,8 +869,8 @@ describe('define', () => {
 
     it('matches member chains through transparent wrappers (audit round 4)', () => {
       const output = transpile('log((a).b); log(a!.b)', { define: { 'a.b': '1' } })
-      expect(output).toContain('log(1); log(1)')
-      expect(output).toMatchInlineSnapshot(`"log(1); log(1)"`)
+      expect(output).toContain('log(1    ); log(1   )')
+      expect(output).toMatchInlineSnapshot(`"log(1    ); log(1   )"`)
     })
 
     it('parenthesizes by expression position, not adjacency (audit round 3)', () => {
@@ -906,8 +906,8 @@ describe('define', () => {
       expect(numeric).toContain('log((-1)["toString"]())')
       expect(numeric).toContain('log((-1) .toString())')
       expect(numeric).toContain('log((-1).x)')
-      expect(numeric).toContain('log(2 ** -1)')
-      expect(numeric).toMatchInlineSnapshot(`"log((-1)["toString"]()); log((-1) .toString()); log((-1).x); log(2 ** -1)"`)
+      expect(numeric).toContain('log(2 ** -1  )')
+      expect(numeric).toMatchInlineSnapshot(`"log((-1)["toString"]()); log((-1) .toString()); log((-1).x); log(2 ** -1  )"`)
     })
 
     it('detaches through transparent TS wrappers (audit round 3)', () => {
@@ -941,8 +941,8 @@ describe('define', () => {
         ].join('\n'),
         { define: { FLAG: '-1' } },
       )
-      expect(output).toContain('log(-1)')
-      expect(output).toContain('log(-1 * 2)')
+      expect(output).toContain('log(-1  )')
+      expect(output).toContain('log(-1   * 2)')
       expect(output).toContain('2 ** -1')
       expect(output).toContain('(-1) ** 2')
       expect(output).toContain('x-(-1)')
@@ -950,9 +950,9 @@ describe('define', () => {
       expect(output).toContain('log((-1).x)')
       expect(output).toContain('(-1).toFixed(2)')
       expect(output).toMatchInlineSnapshot(`
-        "log(-1)
-        log(-1 * 2)
-        const a = 2 ** -1
+        "log(-1  )
+        log(-1   * 2)
+        const a = 2 ** -1  
         const b = (-1) ** 2
         const c = x-(-1)
         const d = -(-1)
@@ -974,19 +974,19 @@ describe('define', () => {
         'console.log([a, b.c, b["c"]], [d, e.f, e["f"]], [g, h.i, h["i"]])',
         { define },
       )
-      expect(read).toContain('[null, null, null]')
-      expect(read).toContain('[ident, ident, ident]')
+      expect(read).toContain('[null, null, null  ]')
+      expect(read).toContain('[ident, ident, ident ]')
       expect(read).toContain('[dot.chain, dot.chain, dot.chain]')
-      expect(read).toMatchInlineSnapshot(`"console.log([null, null, null], [ident, ident, ident], [dot.chain, dot.chain, dot.chain])"`)
+      expect(read).toMatchInlineSnapshot(`"console.log([null, null, null  ], [ident, ident, ident ], [dot.chain, dot.chain, dot.chain])"`)
 
       const write = transpile(
         'console.log([a = 0, b.c = 0, b["c"] = 0], [d = 0, e.f = 0, e["f"] = 0], [g = 0, h.i = 0, h["i"] = 0])',
         { define },
       )
       expect(write).toContain('[a = 0, b.c = 0, b["c"] = 0]')
-      expect(write).toContain('[ident = 0, ident = 0, ident = 0]')
+      expect(write).toContain('[ident = 0, ident = 0, ident  = 0]')
       expect(write).toContain('[dot.chain = 0, dot.chain = 0, dot.chain = 0]')
-      expect(write).toMatchInlineSnapshot(`"console.log([a = 0, b.c = 0, b["c"] = 0], [ident = 0, ident = 0, ident = 0], [dot.chain = 0, dot.chain = 0, dot.chain = 0])"`)
+      expect(write).toMatchInlineSnapshot(`"console.log([a = 0, b.c = 0, b["c"] = 0], [ident = 0, ident = 0, ident  = 0], [dot.chain = 0, dot.chain = 0, dot.chain = 0])"`)
     })
   })
 })

@@ -1,7 +1,12 @@
 //! Define substitution during the main walk: bare identifiers, `this`,
 //! `import.meta` and member chains that match a define key are spliced over
 //! with the value text, in source order, interleaving with the erasure
-//! blanks like enum rewrites do.
+//! blanks like enum rewrites do. A splice shorter than the span it replaces
+//! is padded with trailing spaces to the span's length (see
+//! `BlankString::override_range_sorted_padded`), so later columns on the
+//! line hold; a longer splice still shifts them, and the shaping forms that
+//! lengthen the text (semicolon prefix, shorthand expansion, `(0, x)`
+//! decoupling, decorator whole-head wrap) simply never fall short.
 //!
 //! Guards mirror esbuild's verified behavior: identifier references resolve
 //! through the enum pipeline's scope registry (a parameter, `var`, import,
@@ -66,7 +71,7 @@ impl<'a> Walker<'a> {
         {
             self.blanker
                 .output
-                .override_range_sorted(target.start, target.end, spliced);
+                .override_range_sorted_padded(target.start, target.end, spliced);
             return;
         }
         // shorthand positions share one token for key and value: replacing
@@ -124,7 +129,7 @@ impl<'a> Walker<'a> {
         };
         self.blanker
             .output
-            .override_range_sorted(target.start, target.end, text);
+            .override_range_sorted_padded(target.start, target.end, text);
     }
 
     /// Try a dotted define over a JSX member tag (`<FLAG.X />` with the
@@ -227,7 +232,7 @@ impl<'a> Walker<'a> {
             let _ = outermost;
             self.blanker
                 .output
-                .override_range_sorted(span.start, span.end, text);
+                .override_range_sorted_padded(span.start, span.end, text);
             return true;
         }
         false
@@ -269,7 +274,7 @@ impl<'a> Walker<'a> {
         {
             self.blanker
                 .output
-                .override_range_sorted(target.start, target.end, text);
+                .override_range_sorted_padded(target.start, target.end, text);
             return;
         }
         let (text, target) = self.detached(idx, span, value.dotted, spliced);
@@ -281,7 +286,7 @@ impl<'a> Walker<'a> {
         };
         self.blanker
             .output
-            .override_range_sorted(target.start, target.end, text);
+            .override_range_sorted_padded(target.start, target.end, text);
     }
 
     /// Substitute a bare `import.meta` against the `import.meta` define.
@@ -299,7 +304,7 @@ impl<'a> Walker<'a> {
         {
             self.blanker
                 .output
-                .override_range_sorted(target.start, target.end, text);
+                .override_range_sorted_padded(target.start, target.end, text);
             return;
         }
         let (text, target) = self.detached(idx, span, value.dotted, spliced);
@@ -311,7 +316,7 @@ impl<'a> Walker<'a> {
         };
         self.blanker
             .output
-            .override_range_sorted(target.start, target.end, text);
+            .override_range_sorted_padded(target.start, target.end, text);
     }
 
     /// Try to substitute the member chain rooted at member node `idx`.
@@ -412,7 +417,7 @@ impl<'a> Walker<'a> {
         {
             self.blanker
                 .output
-                .override_range_sorted(target.start, target.end, spliced);
+                .override_range_sorted_padded(target.start, target.end, spliced);
             return true;
         }
         let text = self.wrap_directive(idx, value, text);
@@ -434,7 +439,7 @@ impl<'a> Walker<'a> {
         } else {
             text
         };
-        self.blanker.output.override_range_sorted(span.start, span.end, text);
+        self.blanker.output.override_range_sorted_padded(span.start, span.end, text);
         true
     }
 
@@ -533,6 +538,8 @@ impl<'a> Walker<'a> {
         if value.numeric && self.followed_by_dot(span) {
             text.push(' ');
         }
+        // the separator space lands inside the splice text, so the
+        // equal-length padding counts it and merges with it — one run
         text
     }
 

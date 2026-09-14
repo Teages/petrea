@@ -69,8 +69,8 @@ describe('define', () => {
         'for (obj.FLAG of [1]) {}\nlog(obj.FLAG)',
         { define: { 'obj.FLAG': 'async' } },
       )
-      expect(output).toContain('for ((async) of [1])')
-      expect(output).toContain('log(async)')
+      expect(output).toContain('for ((async)  of [1])')
+      expect(output).toContain('log(async   )')
     })
 
     it('keeps a function-enclosed class decorator reading that function this', () => {
@@ -85,7 +85,7 @@ describe('define', () => {
       // the decorator evaluates in the scope enclosing the member: inside
       // f that is f's this, so it stays; at the top level it replaces
       expect(output).toContain('@dec(this.x)')
-      expect(output).toContain('@dec(2)')
+      expect(output).toContain('@dec(2     )')
     })
 
     it('wraps every non-chain decorator head shape in parentheses', () => {
@@ -118,7 +118,7 @@ describe('define', () => {
       // numeric member access
       expect(transpile('@FLAG.x class C {}', { define: { FLAG: '42' } })).toContain('@(42 .x)')
       // argument positions are ordinary expressions
-      expect(transpile('@dec(FLAG) class C {}', { define: { FLAG: '42' } })).toContain('@dec(42)')
+      expect(transpile('@dec(FLAG) class C {}', { define: { FLAG: '42' } })).toContain('@dec(42  )')
     })
 
     it('detaches the receiver of an enum-qualified call splice', () => {
@@ -148,7 +148,7 @@ describe('define', () => {
 
     it('works on the UTF-16 path (BOM input)', () => {
       const output = transpile('﻿console.log(__DEV__)', { define: { __DEV__: 'true' } })
-      expect(output).toContain('console.log(true)')
+      expect(output).toContain('console.log(true   )')
     })
 
     it('kept namespaces stay verbatim (no substitution inside)', () => {
