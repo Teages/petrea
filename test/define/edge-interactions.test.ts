@@ -11,6 +11,42 @@ import { transpile } from '../parity'
  */
 describe('define', () => {
   describe('edge interactions', () => {
+    it('prefixes a semicolon when a splice opens a semicolonless statement', () => {
+      // the detached/parenthesized/directive splice shapes all begin with
+      // `(` where the original identifier could not, and a bare `-` value
+      // does the same for `-`; without the semicolon the previous statement
+      // swallows the line as a continuation call
+      const dotted = { LOG: 'logger.log' } as Record<string, string>
+      expect(transpile('start()\nLOG("ready")', { define: dotted }))
+        .toContain(';(0, logger.log)("ready")')
+      expect(transpile('a()\nthis()', { define: { this: 'obj.m' } }))
+        .toContain(';(0, obj.m)()')
+      expect(transpile('a()\nFLAG.x', { define: { FLAG: '-1' } }))
+        .toContain(';(-1).x')
+      expect(transpile('a()\nobj.KEY', { define: { 'obj.KEY': '-1' } }))
+        .toContain(';-1')
+      expect(transpile('a()\nFLAG', { define: { FLAG: '"x"' } }))
+        .toContain(';("x")')
+    })
+
+    it('keeps the boundary where the splice cannot continue a statement', () => {
+      const dotted = { LOG: 'logger.log' } as Record<string, string>
+      // after `;`, after a closed block, at a block's head — and clause
+      // bodies, where a semicolon would become the body and skip the call
+      for (const source of [
+        'a();\nLOG()',
+        'function a() {}\nLOG()',
+        '{\nLOG()\n}',
+        'if (x)\nLOG()',
+        'if (x) b()\nelse LOG()',
+        'while (c)\nLOG()',
+        'const v = LOG()',
+      ]) {
+        expect(transpile(source, { define: dotted })).not.toContain(';(')
+        expect(transpile(source, { define: dotted })).not.toContain(';-')
+      }
+    })
+
     it('parenthesizes async in a member-chain for-of target', () => {
       const output = transpile(
         'for (obj.FLAG of [1]) {}\nlog(obj.FLAG)',

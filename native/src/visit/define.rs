@@ -117,6 +117,11 @@ impl<'a> Walker<'a> {
                 text = format!("({text})");
             }
         }
+        let text = if self.statement_needs_leading_semicolon(idx, target, &text) {
+            format!(";{text}")
+        } else {
+            text
+        };
         self.blanker
             .output
             .override_range_sorted(target.start, target.end, text);
@@ -269,6 +274,11 @@ impl<'a> Walker<'a> {
         }
         let (text, target) = self.detached(idx, span, value.dotted, spliced);
         let text = self.wrap_directive(idx, value, text);
+        let text = if self.statement_needs_leading_semicolon(idx, target, &text) {
+            format!(";{text}")
+        } else {
+            text
+        };
         self.blanker
             .output
             .override_range_sorted(target.start, target.end, text);
@@ -294,6 +304,11 @@ impl<'a> Walker<'a> {
         }
         let (text, target) = self.detached(idx, span, value.dotted, spliced);
         let text = self.wrap_directive(idx, value, text);
+        let text = if self.statement_needs_leading_semicolon(idx, target, &text) {
+            format!(";{text}")
+        } else {
+            text
+        };
         self.blanker
             .output
             .override_range_sorted(target.start, target.end, text);
@@ -413,6 +428,11 @@ impl<'a> Walker<'a> {
             } else {
                 text
             }
+        };
+        let text = if self.statement_needs_leading_semicolon(idx, span, &text) {
+            format!(";{text}")
+        } else {
+            text
         };
         self.blanker.output.override_range_sorted(span.start, span.end, text);
         true

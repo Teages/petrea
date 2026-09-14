@@ -7,7 +7,7 @@ use oxc_ast::ast::*;
 use oxc_span::{GetSpan, Span};
 
 use crate::defines::{ChainRoot, DefineValue};
-use crate::visit::walk::Walker;
+use crate::visit::walk::{Walker, is_enum_scope_container};
 
 use super::scopes::NameBinding;
 
@@ -16,6 +16,68 @@ impl<'a> Walker<'a> {
     /// head being the expression after `@`, its member chain, or the callee
     /// of its single call. Argument positions are ordinary expressions and
     /// return None.
+    /// Whether a splice whose text starts with an ASI hazard character —
+    /// `(` from the receiver-detaching, unary-parenthesis or directive wraps,
+    /// `-` from a bare negative — lands at the head of an expression
+    /// statement a preceding semicolonless statement would swallow as a
+    /// continuation. The original token there could never start one, so the
+    /// splice restores the boundary with a leading semicolon, like esbuild's
+    /// printer. Clause bodies (an `if`/`else`/loop head directly above) are
+    /// excluded: nothing precedes the statement there, and a semicolon would
+    /// itself become the clause body and skip the call.
+    pub(crate) fn statement_needs_leading_semicolon(
+        &self,
+        idx: u32,
+        target: Span,
+        text: &str,
+    ) -> bool {
+        if !matches!(text.as_bytes().first(), Some(b'(' | b'[' | b'`' | b'+' | b'-')) {
+            return false;
+        }
+        // the splice is statement-initial when every ancestor up to the
+        // statement starts where it does — the leftmost chain: a callee, a
+        // tagged template's tag, a member's object all qualify, while any
+        // later operand (`x = …`, `await …`) starts elsewhere and cannot
+        // introduce a hazard at the line head
+        let (top, _) = self.unwrap_up(idx);
+        let mut statement = None;
+        let mut node = top;
+        loop {
+            let parent = self.parent_of(node);
+            if parent == u32::MAX || self.node_kind(parent).span().start != target.start {
+                break;
+            }
+            if matches!(self.node_kind(parent), AstKind::ExpressionStatement(_)) {
+                statement = Some(parent);
+                break;
+            }
+            node = parent;
+        }
+        let Some(statement) = statement else {
+            return false;
+        };
+        // only a statement in a list can follow anything; a clause body's
+        // parent is the clause node itself
+        let list = self.parent_of(statement);
+        if !is_enum_scope_container(self.node_kind(list))
+            && !matches!(self.node_kind(list), AstKind::SwitchCase(_))
+        {
+            return false;
+        }
+        // the boundary holds across `;` and a closed or opened block;
+        // anything else — an identifier, `)`, a string, even a comment's
+        // last byte — can continue into the hazard character
+        match self.src[..target.start as usize]
+            .bytes()
+            .rev()
+            .find(|byte| !byte.is_ascii_whitespace())
+        {
+            Some(b';' | b'}' | b'{') => false,
+            Some(_) => true,
+            None => false,
+        }
+    }
+
     pub(crate) fn decorator_head(&self, idx: u32) -> Option<u32> {
         let (mut node, mut calls) = (self.unwrap_up(idx).0, 0);
         loop {

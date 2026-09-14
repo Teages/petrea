@@ -282,12 +282,14 @@ describe('define', () => {
       expect(output).toContain('(0, obj.method)`tpl`')
       expect(output).toContain('(0, obj.method)?.()')
       expect(output).toContain('new obj.method()')
+      // the leading semicolons replace esbuild's trailing ones: the splice
+      // opens a statement the previous line would otherwise continue
       expect(output).toMatchInlineSnapshot(`
         "(0, obj.method)()
-        (0, obj.method)\`tpl\`
-        (0, obj.method)?.()
+        ;(0, obj.method)\`tpl\`
+        ;(0, obj.method)?.()
         new obj.method()
-        (0, obj.also)()"
+        ;(0, obj.also)()"
       `)
     })
 
@@ -821,7 +823,7 @@ describe('define', () => {
       expect(output).toContain('** 2')
       expect(output).toMatchInlineSnapshot(`
         "(void 0) .x
-        (void 0)  ** 2"
+        ;(void 0)  ** 2"
       `)
 
       const negated = transpile('FLAG! ** 2', { define: { FLAG: '-1' } })
