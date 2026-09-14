@@ -110,11 +110,10 @@ pub(crate) fn register_other_node<'a>(
         // `import X = ns.foo` survives as unsupported syntax, so the binding
         // it introduces must shadow like any other — but a type-only one is
         // erased and binds nothing
-        AstKind::TSImportEqualsDeclaration(node) => {
-            if node.import_kind == ImportOrExportKind::Value {
+        AstKind::TSImportEqualsDeclaration(node)
+            if node.import_kind == ImportOrExportKind::Value => {
                 bind_shadow(bindings, w.node_scope(idx), node.id.name.as_str(), filter);
             }
-        }
         _ => {}
     }
 }
@@ -129,7 +128,7 @@ fn bind_shadow<'a>(
     name: &'a str,
     filter: Option<&[&str]>,
 ) {
-    if filter.is_some_and(|relevant| !relevant.iter().any(|root| *root == name)) {
+    if filter.is_some_and(|relevant| !relevant.contains(&name)) {
         return;
     }
     bindings

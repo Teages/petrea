@@ -174,7 +174,7 @@ impl<'a, const GATED: bool> Visit<'a> for Flattener<'a, GATED> {
                         && self
                             .gate_relevant
                             .as_ref()
-                            .is_some_and(|roots| roots.iter().any(|root| *root == name));
+                            .is_some_and(|roots| roots.contains(&name));
                     if relevant && !self.gates.bound.contains(&name) {
                         self.gates.bound.push(name);
                     }
@@ -196,7 +196,7 @@ impl<'a, const GATED: bool> Visit<'a> for Flattener<'a, GATED> {
                             let value = literal.value.as_str();
                             starts_relevant(value, &self.gate_firsts)
                                 && self.gate_relevant.as_ref().is_some_and(|roots| {
-                                    roots.iter().any(|root| *root == value)
+                                    roots.contains(&value)
                                 })
                         }
                         TSEnumMemberName::ComputedTemplateString(_) => true,
@@ -614,49 +614,7 @@ fn prepare_enum_tables(
     walker.enum_folds = collected.folds;
 }
 
-/// One linear pass over the flattened nodes collecting the define gates:
-/// whether any `with` statement exists (recovered parses included — lets
-/// `inside_with` skip its ancestor walk on the common file), and whether any
-/// binding carries a [`crate::defines::Defines::relevant_roots`] name. Both
-/// were separate whole-file costs before; one discriminant-test pass serves
-/// both, and the second decides whether defines force the scope model.
-fn scan_define_gates<'a>(nodes: &[AstKind<'a>], relevant: &[&str]) -> DefineGates<'a> {
-    // a first-byte bitmap gates the probe: a binding starting with a byte no
-    // relevant root starts with cannot match, so the string compares run only
-    // for the few surviving names
-    let mut firsts = [0u64; 4];
-    for root in relevant {
-        if let Some(&byte) = root.as_bytes().first() {
-            firsts[(byte as usize) >> 6] |= 1u64 << (byte & 63);
-        }
-    }
-    let starts_relevant = |name: &str| match name.as_bytes().first() {
-        Some(&byte) => firsts[(byte as usize) >> 6] & (1u64 << (byte & 63)) != 0,
-        None => false,
-    };
-    let mut gates = DefineGates::default();
-    for kind in nodes {
-        match kind {
-            AstKind::WithStatement(_) => gates.has_with = true,
-            // any JSX syntax implies an element or fragment around it, so the
-            // two kinds together detect "file has JSX" for the tag guards
-            AstKind::JSXElement(_) | AstKind::JSXFragment(_) => gates.has_jsx = true,
-            AstKind::BindingIdentifier(binding) => {
-                let name = binding.name.as_str();
-                if starts_relevant(name)
-                    && relevant.iter().any(|root| *root == name)
-                    && !gates.bound.contains(&name)
-                {
-                    gates.bound.push(name);
-                }
-            }
-            _ => {}
-        }
-    }
-    gates
-}
-
-/// What [`scan_define_gates`] learned about a define-active file: `with`
+/// What the flattening pass learned about a define-active file: `with`
 /// presence (skips ancestor walks when absent), JSX presence (skips every
 /// tag-position guard when absent), and the relevant names actually bound
 /// (a name outside the list resolves global without a scope walk — sound

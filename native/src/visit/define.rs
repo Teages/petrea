@@ -837,7 +837,7 @@ impl<'a> Walker<'a> {
         if self
             .bound_relevant
             .as_ref()
-            .is_some_and(|bound| !bound.iter().any(|bound_name| *bound_name == name))
+            .is_some_and(|bound| !bound.contains(&name))
         {
             return false;
         }
