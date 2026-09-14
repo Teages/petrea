@@ -29,6 +29,27 @@ pub(crate) enum ChainRoot {
     ImportMeta,
 }
 
+/// A borrowed [`ChainRoot`], for table matching without cloning the name —
+/// the chain probe builds one per candidate member expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChainRootRef<'a> {
+    Ident(&'a str),
+    This,
+    ImportMeta,
+}
+
+impl ChainRoot {
+    /// Whether this owned root is the same root `other` borrows.
+    fn matches(&self, other: ChainRootRef<'_>) -> bool {
+        match (self, other) {
+            (ChainRoot::Ident(name), ChainRootRef::Ident(other)) => name == other,
+            (ChainRoot::This, ChainRootRef::This) => true,
+            (ChainRoot::ImportMeta, ChainRootRef::ImportMeta) => true,
+            _ => false,
+        }
+    }
+}
+
 /// One validated replacement: the splice text plus the root of an entity
 /// value — `None` for literals.
 pub(crate) struct DefineValue {
@@ -64,7 +85,7 @@ pub(crate) struct DefineValue {
 }
 
 /// A multi-segment key, matched by its full root + segment list.
-struct DotEntry {
+pub(crate) struct DotEntry {
     root: ChainRoot,
     /// segments after the root, in key order (the outermost property last)
     segments: Vec<String>,
@@ -161,10 +182,11 @@ impl Defines {
         })
     }
 
-    /// The longest multi-segment key ending in `tail`, if any — the chain
-    /// builder stops after that many segments, and callers with no candidate
-    /// for their outermost property skip chain building entirely.
-    pub(crate) fn max_dotted_chain(&self, tail: &str) -> Option<usize> {
+    /// The bucket of multi-segment keys whose tail is `tail`, first-byte
+    /// gated like every tail probe — the single table lookup that both
+    /// bounds the chain walk and hosts the exact match, so the hot path
+    /// hashes the tail once.
+    pub(crate) fn dotted_bucket(&self, tail: &str) -> Option<&[DotEntry]> {
         if tail.is_empty() {
             if !self.dotted_empty_tail {
                 return None;
@@ -173,9 +195,12 @@ impl Defines {
         else if !has_first_bit(&self.dotted_first, tail) {
             return None;
         }
-        self.dotted
-            .get(tail)
-            .and_then(|entries| entries.iter().map(|entry| entry.segments.len()).max())
+        self.dotted.get(tail).map(Vec::as_slice)
+    }
+
+    /// The longest key in `bucket`, bounding how far a chain walk may go.
+    pub(crate) fn bucket_limit(bucket: &[DotEntry]) -> usize {
+        bucket.iter().map(|entry| entry.segments.len()).max().unwrap_or(0)
     }
 
     /// The value a member chain maps to. `chain` holds the property names
@@ -183,16 +208,25 @@ impl Defines {
     /// the whole key, root included. Keys written with `["string"]` segments
     /// match chains spelled either way — only the decoded segment values
     /// matter.
-    pub(crate) fn dotted(&self, chain: &[&str], root: &ChainRoot) -> Option<&DefineValue> {
-        let head = chain.first()?;
-        self.dotted
-            .get(*head)
-            .and_then(|entries| {
-                entries.iter().find(|entry| {
-                    entry.segments.len() == chain.len()
-                        && entry.root == *root
-                        && entry.segments.iter().rev().zip(chain).all(|(s, c)| s == c)
-                })
+    pub(crate) fn dotted(&self, chain: &[&str], root: ChainRootRef<'_>) -> Option<&DefineValue> {
+        let head = *chain.first()?;
+        self.dotted_in_bucket(self.dotted_bucket(head)?, chain, root)
+    }
+
+    /// The exact-match half of [`Self::dotted`] against a bucket the caller
+    /// already holds from [`Self::dotted_bucket`].
+    pub(crate) fn dotted_in_bucket(
+        &self,
+        bucket: &[DotEntry],
+        chain: &[&str],
+        root: ChainRootRef<'_>,
+    ) -> Option<&DefineValue> {
+        bucket
+            .iter()
+            .find(|entry| {
+                entry.segments.len() == chain.len()
+                    && entry.root.matches(root)
+                    && entry.segments.iter().rev().zip(chain).all(|(s, c)| s == c)
             })
             .map(|entry| &self.values[entry.index as usize])
     }
@@ -488,20 +522,23 @@ mod tests {
         assert!(defines.identifier("w").unwrap().assignable);
         assert!(defines.identifier("g").unwrap().assignable);
         assert!(!defines.identifier("c").unwrap().assignable);
-        assert!(defines.dotted(&["k", "j"], &ChainRoot::Ident("i".into())).is_some());
-        assert!(defines.dotted(&["class"], &ChainRoot::Ident("k".into())).is_some());
-        assert!(defines.dotted(&["MODE", "env"], &ChainRoot::ImportMeta).is_some());
-        assert!(defines.dotted(&["j"], &ChainRoot::Ident("i".into())).is_none());
-        assert!(defines.dotted(&["k", "j"], &ChainRoot::This).is_none());
+        assert!(defines.dotted(&["k", "j"], ChainRootRef::Ident("i")).is_some());
+        assert!(defines.dotted(&["class"], ChainRootRef::Ident("k")).is_some());
+        assert!(defines.dotted(&["MODE", "env"], ChainRootRef::ImportMeta).is_some());
+        assert!(defines.dotted(&["j"], ChainRootRef::Ident("i")).is_none());
+        assert!(defines.dotted(&["k", "j"], ChainRootRef::This).is_none());
         // a bracket-spelled key matches a dot-spelled chain and vice versa
         // the first-byte filters reject probe names no key can equal
         let filtered = build(&[("a.key", "1")]).unwrap();
-        assert_eq!(filtered.max_dotted_chain(""), None);
-        assert_eq!(filtered.max_dotted_chain("z"), None);
-        assert_eq!(filtered.max_dotted_chain("key"), Some(1));
+        assert!(filtered.dotted_bucket("").is_none());
+        assert!(filtered.dotted_bucket("z").is_none());
+        assert_eq!(Defines::bucket_limit(filtered.dotted_bucket("key").unwrap()), 1);
         assert!(build(&[("a.key", "1")]).unwrap().identifier("b").is_none());
         // an empty-string tail segment is representable and stays reachable
-        assert_eq!(build(&[("x[\"\"]", "1")]).unwrap().max_dotted_chain(""), Some(1));
+        assert_eq!(
+            Defines::bucket_limit(build(&[("x[\"\"]", "1")]).unwrap().dotted_bucket("").unwrap()),
+            1,
+        );
         // trailing comments in the value text are dropped with the trivia
         assert_eq!(build(&[("c", "1 //c")]).unwrap().identifier("c").unwrap().text, "1");
         assert_eq!(
@@ -509,8 +546,8 @@ mod tests {
             "\"s\""
         );
         let bracket = build(&[("x.y[\"z\"]", "true")]).unwrap();
-        assert!(bracket.dotted(&["z", "y"], &ChainRoot::Ident("x".into())).is_some());
-        assert!(bracket.dotted(&["z"], &ChainRoot::Ident("x".into())).is_none());
+        assert!(bracket.dotted(&["z", "y"], ChainRootRef::Ident("x")).is_some());
+        assert!(bracket.dotted(&["z"], ChainRootRef::Ident("x")).is_none());
     }
 
     #[test]

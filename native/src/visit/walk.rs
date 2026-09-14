@@ -320,6 +320,13 @@ pub struct Walker<'a> {
     /// Whether any `with` statement exists (recovered parses included) —
     /// lets `inside_with` skip its ancestor walk on the common file.
     pub(crate) has_with: bool,
+    /// Whether any JSX syntax exists — every tag-position guard and member-tag
+    /// probe early-outs when the file cannot contain one.
+    pub(crate) has_jsx: bool,
+    /// The relevant names the gate scan found bound (enum-free define files
+    /// only): [`crate::visit::define`] answers shadow queries for names
+    /// outside it as global without a scope walk.
+    pub(crate) bound_relevant: Option<Vec<&'a str>>,
     /// Memoized (scope, name) → binding resolutions; bindings freeze after
     /// the prepare pass, so entries stay valid for the whole walk. A plain
     /// map (no interior mutability) keeps `Walker` covariant over `'a`.
@@ -392,7 +399,7 @@ fn prepare_enum_tables(
 /// binding carries a [`crate::defines::Defines::relevant_roots`] name. Both
 /// were separate whole-file costs before; one discriminant-test pass serves
 /// both, and the second decides whether defines force the scope model.
-fn scan_define_gates(nodes: &[AstKind<'_>], relevant: &[&str]) -> (bool, bool) {
+fn scan_define_gates<'a>(nodes: &[AstKind<'a>], relevant: &[&str]) -> DefineGates<'a> {
     // a first-byte bitmap gates the probe: a binding starting with a byte no
     // relevant root starts with cannot match, so the string compares run only
     // for the few surviving names
@@ -406,20 +413,38 @@ fn scan_define_gates(nodes: &[AstKind<'_>], relevant: &[&str]) -> (bool, bool) {
         Some(&byte) => firsts[(byte as usize) >> 6] & (1u64 << (byte & 63)) != 0,
         None => false,
     };
-    let mut has_with = false;
-    let mut relevant_bound = false;
+    let mut gates = DefineGates::default();
     for kind in nodes {
         match kind {
-            AstKind::WithStatement(_) => has_with = true,
+            AstKind::WithStatement(_) => gates.has_with = true,
+            // any JSX syntax implies an element or fragment around it, so the
+            // two kinds together detect "file has JSX" for the tag guards
+            AstKind::JSXElement(_) | AstKind::JSXFragment(_) => gates.has_jsx = true,
             AstKind::BindingIdentifier(binding) => {
                 let name = binding.name.as_str();
-                relevant_bound |=
-                    starts_relevant(name) && relevant.iter().any(|root| *root == name);
+                if starts_relevant(name)
+                    && relevant.iter().any(|root| *root == name)
+                    && !gates.bound.contains(&name)
+                {
+                    gates.bound.push(name);
+                }
             }
             _ => {}
         }
     }
-    (has_with, relevant_bound)
+    gates
+}
+
+/// What [`scan_define_gates`] learned about a define-active file: `with`
+/// presence (skips ancestor walks when absent), JSX presence (skips every
+/// tag-position guard when absent), and the relevant names actually bound
+/// (a name outside the list resolves global without a scope walk — sound
+/// only while no enum member scope exists, hence enum files forgo the list).
+#[derive(Default)]
+pub(crate) struct DefineGates<'a> {
+    pub(crate) has_with: bool,
+    pub(crate) has_jsx: bool,
+    pub(crate) bound: Vec<&'a str>,
 }
 
 /// Iterator over the linked-list children of a node, in visit order.
@@ -474,6 +499,8 @@ pub fn blank_program<'a>(
         node_scope: Vec::new(),
         defines,
         has_with: false,
+        has_jsx: false,
+        bound_relevant: None,
         binding_cache: std::collections::HashMap::default(),
     };
 
@@ -492,16 +519,22 @@ pub fn blank_program<'a>(
         // so does any file binding a relevant name — the precise shadow walk
         // then runs exactly where it can change an outcome.
         let mut define_name_filter: Option<Vec<&str>> = None;
+        let mut bound_relevant: Option<Vec<&str>> = None;
         let defines_need_model = match defines {
             Some(defines) if !defines.is_empty() => {
                 let relevant = defines.relevant_roots();
-                let (has_with, relevant_bound) = scan_define_gates(&walker.nodes, &relevant);
-                walker.has_with = has_with;
+                let gates = scan_define_gates(&walker.nodes, &relevant);
+                walker.has_with = gates.has_with;
+                walker.has_jsx = gates.has_jsx;
+                // per-name bindings are sound only without enum member scopes
+                if enum_indices.is_empty() {
+                    bound_relevant = Some(gates.bound);
+                }
                 // a bound relevant name needs the precise shadow walk; enums
                 // matter only for entity values, whose splices qualify
                 // through enum member scopes — literal-only defines never
                 // resolve a name and skip the model on enum files too
-                let need = relevant_bound
+                let need = bound_relevant.as_ref().is_some_and(|bound| !bound.is_empty())
                     || (!enum_indices.is_empty() && defines.has_entity_values());
                 // the registry then serves define resolutions only — names
                 // outside the relevant set never join it
@@ -512,6 +545,7 @@ pub fn blank_program<'a>(
             }
             _ => false,
         };
+        walker.bound_relevant = bound_relevant;
         prepare_enum_tables(
             &mut walker,
             &enum_indices,
@@ -560,6 +594,8 @@ pub fn blank_program_utf16<'a>(
         node_scope: Vec::new(),
         defines,
         has_with: false,
+        has_jsx: false,
+        bound_relevant: None,
         binding_cache: std::collections::HashMap::default(),
     };
 
@@ -577,16 +613,22 @@ pub fn blank_program_utf16<'a>(
         // so does any file binding a relevant name — the precise shadow walk
         // then runs exactly where it can change an outcome.
         let mut define_name_filter: Option<Vec<&str>> = None;
+        let mut bound_relevant: Option<Vec<&str>> = None;
         let defines_need_model = match defines {
             Some(defines) if !defines.is_empty() => {
                 let relevant = defines.relevant_roots();
-                let (has_with, relevant_bound) = scan_define_gates(&walker.nodes, &relevant);
-                walker.has_with = has_with;
+                let gates = scan_define_gates(&walker.nodes, &relevant);
+                walker.has_with = gates.has_with;
+                walker.has_jsx = gates.has_jsx;
+                // per-name bindings are sound only without enum member scopes
+                if enum_indices.is_empty() {
+                    bound_relevant = Some(gates.bound);
+                }
                 // a bound relevant name needs the precise shadow walk; enums
                 // matter only for entity values, whose splices qualify
                 // through enum member scopes — literal-only defines never
                 // resolve a name and skip the model on enum files too
-                let need = relevant_bound
+                let need = bound_relevant.as_ref().is_some_and(|bound| !bound.is_empty())
                     || (!enum_indices.is_empty() && defines.has_entity_values());
                 // the registry then serves define resolutions only — names
                 // outside the relevant set never join it
@@ -597,6 +639,7 @@ pub fn blank_program_utf16<'a>(
             }
             _ => false,
         };
+        walker.bound_relevant = bound_relevant;
         prepare_enum_tables(
             &mut walker,
             &enum_indices,

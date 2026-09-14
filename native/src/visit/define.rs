@@ -24,7 +24,9 @@ use oxc_span::GetSpan;
 use oxc_span::Span;
 
 use crate::defines::ChainRoot;
+use crate::defines::ChainRootRef;
 use crate::defines::DefineValue;
+use crate::defines::Defines;
 use crate::visit::enums::model::scope_above;
 use crate::visit::walk::Walker;
 
@@ -97,7 +99,7 @@ impl<'a> Walker<'a> {
         if self.define_shadowed(idx, root_name) || self.inside_with(idx) {
             return false;
         }
-        self.jsx_member_tag_splice(idx, &links, outermost, ChainRoot::Ident(root_name.to_string()))
+        self.jsx_member_tag_splice(idx, &links, outermost, ChainRootRef::Ident(root_name))
     }
 
     /// The `this`-rooted variant: `<this.X />` under a `this.X` key. No
@@ -107,13 +109,18 @@ impl<'a> Walker<'a> {
         let Some((links, outermost)) = self.collect_jsx_member_links(idx) else {
             return false;
         };
-        self.jsx_member_tag_splice(idx, &links, outermost, ChainRoot::This)
+        self.jsx_member_tag_splice(idx, &links, outermost, ChainRootRef::This)
     }
 
     /// (member node, property) pairs from the root outward (inner first)
     /// plus the outermost wrapper, when the reference roots a JSX member
     /// tag.
     fn collect_jsx_member_links(&self, idx: u32) -> Option<(Vec<(u32, String)>, u32)> {
+        // a file without JSX syntax cannot hold a member tag; one flag test
+        // replaces the parent probe every reference and `this` pays
+        if !self.has_jsx {
+            return None;
+        }
         let mut links: Vec<(u32, String)> = Vec::new();
         let mut node = idx;
         loop {
@@ -137,7 +144,7 @@ impl<'a> Walker<'a> {
         idx: u32,
         links: &[(u32, String)],
         outermost: u32,
-        root: ChainRoot,
+        root: ChainRootRef<'_>,
     ) -> bool {
         let Some(defines) = self.defines else { return false };
         // longest prefix first
@@ -147,7 +154,7 @@ impl<'a> Walker<'a> {
                 .map(|(_, property)| property.as_str())
                 .rev()
                 .collect();
-            let Some(value) = defines.dotted(&chain, &root) else {
+            let Some(value) = defines.dotted(&chain, root) else {
                 continue;
             };
             let end = self.node_kind(links[take - 1].0).span().end;
@@ -259,7 +266,8 @@ impl<'a> Walker<'a> {
             }
             _ => return false,
         };
-        let Some(limit) = defines.max_dotted_chain(tail) else { return false };
+        let Some(bucket) = defines.dotted_bucket(tail) else { return false };
+        let limit = Defines::bucket_limit(bucket);
         // property names from the outermost member inward; transparent
         // wrappers between links are skipped, and the root must be a bare
         // identifier reference, `this` (top level only) or `import.meta`
@@ -306,13 +314,11 @@ impl<'a> Walker<'a> {
         // members merely share a tail with a key would otherwise resolve —
         // and memoize — bindings for names that never substitute
         let root = match root_kind {
-            ChainRootKind::Ident => {
-                ChainRoot::Ident(root_name.expect("identifier root").to_string())
-            }
-            ChainRootKind::This => ChainRoot::This,
-            ChainRootKind::ImportMeta => ChainRoot::ImportMeta,
+            ChainRootKind::Ident => ChainRootRef::Ident(root_name.expect("identifier root")),
+            ChainRootKind::This => ChainRootRef::This,
+            ChainRootKind::ImportMeta => ChainRootRef::ImportMeta,
         };
-        let Some(value) = defines.dotted(&chain, &root) else { return false };
+        let Some(value) = defines.dotted_in_bucket(bucket, &chain, root) else { return false };
         // identifier roots resolve through the scope model; a `this` root
         // only exists at top level
         let root_blocked = match root_kind {
@@ -527,6 +533,9 @@ impl<'a> Walker<'a> {
     /// Whether the reference sits in a JSX tag position, and whether the
     /// tag is a member expression rooted at it; `None` outside tags.
     fn jsx_tag_position(&self, idx: u32) -> Option<bool> {
+        if !self.has_jsx {
+            return None;
+        }
         let mut top = idx;
         let mut member_root = false;
         loop {
@@ -657,6 +666,16 @@ impl<'a> Walker<'a> {
     /// the reference reads that binding at runtime instead of a defined
     /// global (see [`name_binding`] for what counts).
     fn define_shadowed(&mut self, idx: u32, name: &'a str) -> bool {
+        // on enum-free files the gate scan proved which relevant names are
+        // bound; one outside that set has no binding anywhere and resolves
+        // global without a scope walk
+        if self
+            .bound_relevant
+            .as_ref()
+            .is_some_and(|bound| !bound.iter().any(|bound_name| *bound_name == name))
+        {
+            return false;
+        }
         !matches!(self.name_binding(idx, name), NameBinding::Global)
     }
 
