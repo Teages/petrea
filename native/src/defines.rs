@@ -81,6 +81,30 @@ pub(crate) struct Defines {
     this_define: Option<u32>,
     import_meta_define: Option<u32>,
     values: Vec<DefineValue>,
+    /// First-byte membership bitmaps over the probe keys (`identifier` keys,
+    /// `dotted` tails): a name starting with a byte no key starts with
+    /// cannot equal any key, so the hash round is skipped — the common case
+    /// for every non-key reference in a define-active file.
+    ident_first: [u64; 4],
+    dotted_first: [u64; 4],
+    /// Whether any dotted tail is the empty string (a `x[""]` key): the
+    /// bitmap cannot represent it, so empty probe tails fall through.
+    dotted_empty_tail: bool,
+}
+
+/// Mark `name`'s first byte present in `map`.
+fn set_first_bit(map: &mut [u64; 4], name: &str) {
+    if let Some(&byte) = name.as_bytes().first() {
+        map[(byte as usize) >> 6] |= 1u64 << (byte & 63);
+    }
+}
+
+/// Whether `name`'s first byte is marked present in `map`.
+fn has_first_bit(map: &[u64; 4], name: &str) -> bool {
+    match name.as_bytes().first() {
+        Some(&byte) => map[(byte as usize) >> 6] & (1u64 << (byte & 63)) != 0,
+        None => false,
+    }
 }
 
 impl Defines {
@@ -90,6 +114,9 @@ impl Defines {
 
     /// The value a bare identifier reference maps to, if any.
     pub(crate) fn identifier(&self, name: &str) -> Option<&DefineValue> {
+        if !has_first_bit(&self.ident_first, name) {
+            return None;
+        }
         self.identifiers.get(name).map(|&i| &self.values[i as usize])
     }
 
@@ -138,6 +165,14 @@ impl Defines {
     /// builder stops after that many segments, and callers with no candidate
     /// for their outermost property skip chain building entirely.
     pub(crate) fn max_dotted_chain(&self, tail: &str) -> Option<usize> {
+        if tail.is_empty() {
+            if !self.dotted_empty_tail {
+                return None;
+            }
+        }
+        else if !has_first_bit(&self.dotted_first, tail) {
+            return None;
+        }
         self.dotted
             .get(tail)
             .and_then(|entries| entries.iter().map(|entry| entry.segments.len()).max())
@@ -197,6 +232,17 @@ impl Defines {
                         index,
                     });
                 }
+            }
+        }
+        for key in defines.identifiers.keys() {
+            set_first_bit(&mut defines.ident_first, key);
+        }
+        for tail in defines.dotted.keys() {
+            if tail.is_empty() {
+                defines.dotted_empty_tail = true;
+            }
+            else {
+                set_first_bit(&mut defines.dotted_first, tail);
             }
         }
         Ok(defines)
@@ -448,6 +494,14 @@ mod tests {
         assert!(defines.dotted(&["j"], &ChainRoot::Ident("i".into())).is_none());
         assert!(defines.dotted(&["k", "j"], &ChainRoot::This).is_none());
         // a bracket-spelled key matches a dot-spelled chain and vice versa
+        // the first-byte filters reject probe names no key can equal
+        let filtered = build(&[("a.key", "1")]).unwrap();
+        assert_eq!(filtered.max_dotted_chain(""), None);
+        assert_eq!(filtered.max_dotted_chain("z"), None);
+        assert_eq!(filtered.max_dotted_chain("key"), Some(1));
+        assert!(build(&[("a.key", "1")]).unwrap().identifier("b").is_none());
+        // an empty-string tail segment is representable and stays reachable
+        assert_eq!(build(&[("x[\"\"]", "1")]).unwrap().max_dotted_chain(""), Some(1));
         // trailing comments in the value text are dropped with the trivia
         assert_eq!(build(&[("c", "1 //c")]).unwrap().identifier("c").unwrap().text, "1");
         assert_eq!(

@@ -393,6 +393,19 @@ fn prepare_enum_tables(
 /// were separate whole-file costs before; one discriminant-test pass serves
 /// both, and the second decides whether defines force the scope model.
 fn scan_define_gates(nodes: &[AstKind<'_>], relevant: &[&str]) -> (bool, bool) {
+    // a first-byte bitmap gates the probe: a binding starting with a byte no
+    // relevant root starts with cannot match, so the string compares run only
+    // for the few surviving names
+    let mut firsts = [0u64; 4];
+    for root in relevant {
+        if let Some(&byte) = root.as_bytes().first() {
+            firsts[(byte as usize) >> 6] |= 1u64 << (byte & 63);
+        }
+    }
+    let starts_relevant = |name: &str| match name.as_bytes().first() {
+        Some(&byte) => firsts[(byte as usize) >> 6] & (1u64 << (byte & 63)) != 0,
+        None => false,
+    };
     let mut has_with = false;
     let mut relevant_bound = false;
     for kind in nodes {
@@ -400,7 +413,8 @@ fn scan_define_gates(nodes: &[AstKind<'_>], relevant: &[&str]) -> (bool, bool) {
             AstKind::WithStatement(_) => has_with = true,
             AstKind::BindingIdentifier(binding) => {
                 let name = binding.name.as_str();
-                relevant_bound |= relevant.iter().any(|root| *root == name);
+                relevant_bound |=
+                    starts_relevant(name) && relevant.iter().any(|root| *root == name);
             }
             _ => {}
         }
