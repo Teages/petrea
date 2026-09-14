@@ -478,6 +478,10 @@ impl<'a> Walker<'a> {
         match self.node_kind(parent) {
             AstKind::StaticMemberExpression(member) => member.object.span().start == start,
             AstKind::ComputedMemberExpression(member) => member.object.span().start == start,
+            // a private-field object is the same hazard: `void 0?.#x` would
+            // parse as `void (0?.#x))` and dereference the number instead of
+            // short-circuiting; `(void 0)?.#x` keeps it
+            AstKind::PrivateFieldExpression(member) => member.object.span().start == start,
             AstKind::BinaryExpression(binary) => {
                 binary.operator == BinaryOperator::Exponential
                     && binary.left.span().start == start
@@ -666,6 +670,14 @@ impl<'a> Walker<'a> {
     /// the reference reads that binding at runtime instead of a defined
     /// global (see [`name_binding`] for what counts).
     fn define_shadowed(&mut self, idx: u32, name: &'a str) -> bool {
+        // `arguments` is an implicit binding of every non-arrow function —
+        // never a BindingIdentifier, so neither the registry nor the gate
+        // scan sees it; arrows inherit it lexically, and class field
+        // initializers or static blocks cannot spell it at all (early
+        // error), so one enclosing Function decides
+        if name == "arguments" && self.arguments_is_nested(idx) {
+            return true;
+        }
         // on enum-free files the gate scan proved which relevant names are
         // bound; one outside that set has no binding anywhere and resolves
         // global without a scope walk
@@ -677,6 +689,22 @@ impl<'a> Walker<'a> {
             return false;
         }
         !matches!(self.name_binding(idx, name), NameBinding::Global)
+    }
+
+    /// Whether an `arguments` reference sits inside some non-arrow function
+    /// (parameters, defaults and body alike): arrows pass through and inherit
+    /// the binding outward; a top-level reference reads a true global.
+    fn arguments_is_nested(&self, mut idx: u32) -> bool {
+        loop {
+            let parent = self.parent_of(idx);
+            if parent == u32::MAX {
+                return false;
+            }
+            if matches!(self.node_kind(parent), AstKind::Function(_)) {
+                return true;
+            }
+            idx = parent;
+        }
     }
 
     /// Whether a `this` expression sits in a position with its own `this`

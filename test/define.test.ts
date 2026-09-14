@@ -203,6 +203,52 @@ describe('define', () => {
   })
 
   describe('shadowing', () => {
+    it('skips arguments inside functions, an implicit binding no registry sees', () => {
+      const define = { 'arguments.length': '0', 'arguments': 'null' } as Record<string, string>
+      const output = transpile(
+        [
+          'function f() { return arguments.length; const g = () => arguments }',
+          'class K { m() { return arguments.length } }',
+          'log(arguments.length)',
+        ].join('\n'),
+        { define },
+      )
+      expect(output).toContain('return arguments.length')
+      expect(output).toContain('() => arguments')
+      expect(output).toContain('log(0)')
+      expect(output).not.toContain('log(arguments.length)')
+    })
+
+    it('replaces arguments at module top level, where no binding exists', () => {
+      const output = transpile(
+        'const g = () => arguments.length\nlog(arguments)',
+        { define: { 'arguments.length': '0', 'arguments': 'null' } },
+      )
+      expect(output).toContain('() => 0')
+      expect(output).toContain('log(null)')
+    })
+
+    it('parenthesizes a unary splice as a private field object', () => {
+      const output = transpile(
+        'class K { #x = 1\n  m() { return FLAG?.#x }\n  n() { return FLAG.#x } }\nlog(FLAG?.#y)',
+        { define: { FLAG: 'undefined' } },
+      )
+      // `void 0?.#x` would dereference the number instead of short-circuiting
+      expect(output).toContain('(void 0)?.#x')
+      expect(output).toContain('(void 0).#x')
+      expect(output).toContain('(void 0)?.#y')
+      expect(output).not.toContain('void 0?')
+    })
+
+    it('separates a numeric splice from a following private field', () => {
+      const output = transpile(
+        'class K { #x = 1\n  m() { return FLAG.#x } }',
+        { define: { FLAG: '42' } },
+      )
+      expect(output).toContain('42 .#x')
+      expect(output).not.toContain('42.#x')
+    })
+
     it('skips references a parameter shadows on an enum-declaring file', () => {
       // enum files forgo the bound-name fast path (member scopes are
       // invisible to the binding scan), so their shadow checks must still
