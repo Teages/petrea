@@ -242,15 +242,19 @@ fn register_variable<'a>(
             && let Some(initializer) = declarator.init.as_ref()
         {
             let name = binding_name(&declarator.id);
-            if filter.is_none_or(|relevant| relevant.iter().any(|root| *root == name)) {
-                bindings.bindings.entry(scope).or_default().insert(
-                    name,
-                    ConstBinding::Decl {
-                        initializer,
-                        scope_chain: scope_chain_of(w, index),
-                    },
-                );
+            if filter.is_some() {
+                // An enum-free, define-only registry asks whether a name is
+                // bound, never for its initializer or constant value.
+                bind_shadow(bindings, scope, name, filter);
+                continue;
             }
+            bindings.bindings.entry(scope).or_default().insert(
+                name,
+                ConstBinding::Decl {
+                    initializer,
+                    scope_chain: scope_chain_of(w, index),
+                },
+            );
             continue;
         }
         collect_pattern_shadows(&declarator.id, scope, bindings, filter);
