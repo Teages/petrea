@@ -73,11 +73,33 @@ impl<'a> Walker<'a> {
         // a destructured value is a write target — receiver detachment and
         // directive wrapping never apply inside it
         let (text, target) = if shorthand {
-            (format!("{name}: {text}"), span)
+            // `{__proto__}` is an own data property, but the plain
+            // `__proto__:` spelling sets the prototype instead — the object
+            // literal shorthand expands through the computed key, like
+            // esbuild. Assignment-target shorthands have no such magic.
+            let expansion = if name == "__proto__"
+                && matches!(self.node_kind(self.parent_of(idx)), AstKind::ObjectProperty(_))
+            {
+                format!("[\"{name}\"]: {text}")
+            } else {
+                format!("{name}: {text}")
+            };
+            (expansion, span)
         } else {
             self.detached(idx, span, value, text)
         };
-        let text = self.wrap_directive(idx, value, text);
+        let mut text = self.wrap_directive(idx, value, text);
+        // `for (async of xs)` is a syntax error (the head would parse as an
+        // async-of arrow) — the parens restore the plain identifier
+        {
+            let (top, _) = self.unwrap_up(idx);
+            if let AstKind::ForOfStatement(of) = self.node_kind(self.parent_of(top))
+                && text == "async"
+                && of.left.span().start == self.node_kind(top).span().start
+            {
+                text = format!("({text})");
+            }
+        }
         self.blanker
             .output
             .override_range_sorted(target.start, target.end, text);
@@ -487,6 +509,15 @@ impl<'a> Walker<'a> {
                     && binary.left.span().start == start
             }
             AstKind::NewExpression(new) => new.callee.span().start == start,
+            // class heritage takes a LeftHandSideExpression: `extends void 0`
+            // does not parse, `extends (void 0)` does
+            AstKind::Class(class) => class
+                .heritage
+                .as_ref()
+                .is_some_and(|h| h.expression.span().start == start),
+            // a decorator takes a LeftHandSideExpression too: `@-1` is a
+            // syntax error, `@(-1)` is not
+            AstKind::Decorator(decorator) => decorator.expression.span().start == start,
             // a call callee: `void 0?.(x)` parses as `void (0?.(x))` and
             // loses the optional call's short-circuit; `(void 0)?.(x)` keeps
             // it, which is how a stripper without esbuild's dead-code
@@ -720,6 +751,10 @@ impl<'a> Walker<'a> {
             }
             match self.node_kind(parent) {
                 AstKind::Function(_) | AstKind::StaticBlock(_) => return true,
+                // decorators run at class-definition time and evaluate in the
+                // enclosing scope — a `this` inside one is the outer this,
+                // never the instance's, so the walk is already answered
+                AstKind::Decorator(_) => return false,
                 AstKind::AccessorProperty(node) => {
                     // same rule as fields: an initializer gets the instance
                     // `this`, a computed key evaluates in the enclosing one

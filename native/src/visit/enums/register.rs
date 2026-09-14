@@ -58,7 +58,9 @@ pub(super) fn register_enum_declaration<'a>(
         entry.names.insert(name.clone());
         member_names.push(name);
     }
-    if !w.node_scope.is_empty() {
+    // an ambient enum is erased wholesale — neither its member scope nor its
+    // name binds anything
+    if !node.declare && !w.node_scope.is_empty() {
         // the member scope the declaration introduced: nested declarations
         // resolve bare names through these members
         bindings
@@ -104,6 +106,14 @@ pub(crate) fn register_other_node<'a>(
         }
         AstKind::ImportDeclaration(node) => {
             register_imports(w, idx, node, bindings, filter);
+        }
+        // `import X = ns.foo` survives as unsupported syntax, so the binding
+        // it introduces must shadow like any other — but a type-only one is
+        // erased and binds nothing
+        AstKind::TSImportEqualsDeclaration(node) => {
+            if node.import_kind == ImportOrExportKind::Value {
+                bind_shadow(bindings, w.node_scope(idx), node.id.name.as_str(), filter);
+            }
         }
         _ => {}
     }
@@ -166,6 +176,11 @@ fn register_class_name<'a>(
     let Some(id) = &node.id else {
         return;
     };
+    // an ambient class is erased wholesale — its name binds nothing, so a
+    // reference reads the runtime global exactly what defines must replace
+    if node.declare {
+        return;
+    }
     let class_scope = w.node_scope(idx);
     let scope = if node.r#type == ClassType::ClassDeclaration {
         scope_above(w, class_scope)
@@ -186,12 +201,25 @@ fn register_imports<'a>(
     bindings: &mut ConstBindings<'a>,
     filter: Option<&[&str]>,
 ) {
+    // type-only imports are erased — neither the whole `import type`
+    // declaration nor an inline `import { type X }` specifier binds its name
     for specifier in node.specifiers.iter().flatten() {
-        let local = match specifier {
-            ImportDeclarationSpecifier::ImportSpecifier(s) => &s.local,
-            ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => &s.local,
-            ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => &s.local,
+        let (local, type_only) = match specifier {
+            ImportDeclarationSpecifier::ImportSpecifier(s) => (
+                &s.local,
+                node.import_kind == ImportOrExportKind::Type
+                    || s.import_kind == ImportOrExportKind::Type,
+            ),
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                (&s.local, node.import_kind == ImportOrExportKind::Type)
+            }
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
+                (&s.local, node.import_kind == ImportOrExportKind::Type)
+            }
         };
+        if type_only {
+            continue;
+        }
         bind_shadow(bindings, w.node_scope(idx), local.name.as_str(), filter);
     }
 }
@@ -304,7 +332,12 @@ fn var_scope_of(w: &Walker<'_>, index: u32) -> u32 {
     let mut cursor = index;
     while cursor != u32::MAX {
         match w.node_kind(cursor) {
-            AstKind::Program(_) | AstKind::FunctionBody(_) | AstKind::StaticBlock(_) => {
+            AstKind::Program(_)
+            | AstKind::FunctionBody(_)
+            | AstKind::StaticBlock(_)
+            // a namespace body compiles to an IIFE — `var` inside it stays
+            // inside, never hoisting to the enclosing statements
+            | AstKind::TSModuleBlock(_) => {
                 return w.node_scope(cursor);
             }
             _ => {}

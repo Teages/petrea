@@ -203,6 +203,106 @@ describe('define', () => {
   })
 
   describe('shadowing', () => {
+    it('does not shadow through erased ambient declarations', () => {
+      const define = { FLAG: '1', FLAG2: '1', FLAG3: '1', FLAG4: '1' } as Record<string, string>
+      const output = transpile(
+        [
+          'declare class FLAG {}',
+          'declare enum FLAG2 { A }',
+          'import type { FLAG3 } from "unused"',
+          'import { type FLAG4, kept } from "unused"',
+          'log(FLAG, FLAG2, FLAG3, FLAG4)',
+        ].join('\n'),
+        { define },
+      )
+      expect(output).toContain('log(1, 1, 1, 1)')
+      expect(output).toContain('kept')
+    })
+
+    it('keeps namespace var inside the namespace scope', () => {
+      const output = transpile(
+        [
+          'declare namespace N { var FLAG: number }',
+          'namespace M { var FLAG = 1; export function get() { return FLAG } }',
+          'log(FLAG)',
+        ].join('\n'),
+        { define: { FLAG: '2' } },
+      )
+      expect(output).toContain('log(2)')
+      expect(output).toContain('return FLAG')
+    })
+
+    it('honors import-equals bindings, but not type-only ones', () => {
+      const output = transpile(
+        [
+          'const ns = { foo: 2 }',
+          'import FLAG = ns.foo',
+          'import type TFLAG = require("m")',
+          'log(FLAG, TFLAG)',
+        ].join('\n'),
+        { define: { FLAG: '1', TFLAG: '3' } },
+      )
+      expect(output).toContain('log(FLAG, 3)')
+      expect(output).toContain('import FLAG = ns.foo')
+    })
+
+    it('expands the __proto__ shorthand through a computed key', () => {
+      // fromEntries creates an own property, unlike the `__proto__:` setter
+      const define = Object.fromEntries([['__proto__', 'null']])
+      const output = transpile(
+        'const o = {__proto__}\nconst p = { other: __proto__ }',
+        { define },
+      )
+      // the plain `__proto__:` spelling would set the prototype instead of
+      // defining the own property the shorthand reads
+      expect(output).toContain('{["__proto__"]: null}')
+      expect(output).toContain('{ other: null }')
+    })
+
+    it('parenthesizes async in a for-of write target', () => {
+      const output = transpile(
+        'for (FLAG of [1]) {}\nlog(FLAG)',
+        { define: { FLAG: 'async' } },
+      )
+      expect(output).toContain('for ((async) of [1])')
+      expect(output).toContain('log(async)')
+    })
+
+    it('parenthesizes unary splices in class heritage and decorators', () => {
+      const output = transpile(
+        'class A extends FLAG {}\n@FLAG class B {}\nclass C extends FLAG.x {}',
+        { define: { FLAG: 'undefined' } },
+      )
+      expect(output).toContain('extends (void 0)')
+      // the heritage arm must not fire for the member's object position
+      expect(output).toContain('extends (void 0).x')
+      expect(output).not.toContain('extends void 0')
+    })
+
+    it('parenthesizes negative numeric decorator values', () => {
+      const output = transpile('@FLAG class C {}', { define: { FLAG: '-1' } })
+      expect(output).toContain('@(-1)')
+      expect(output).not.toContain('@-1')
+    })
+
+    it('treats decorator this as the enclosing this, not the instance', () => {
+      const output = transpile(
+        [
+          'class C {',
+          '  @dec(this.x) field',
+          '  @dec(this.y) accessor a',
+          '  @dec(this.z) method() {}',
+          '  inner = this.w',
+          '}',
+        ].join('\n'),
+        { define: { 'this.x': '1', 'this.y': '2', 'this.z': '3' } },
+      )
+      expect(output).toContain('@dec(1)')
+      expect(output).toContain('@dec(2)')
+      expect(output).toContain('@dec(3)')
+      expect(output).toContain('this.w')
+    })
+
     it('skips arguments inside functions, an implicit binding no registry sees', () => {
       const define = { 'arguments.length': '0', 'arguments': 'null' } as Record<string, string>
       const output = transpile(
