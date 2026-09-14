@@ -19,12 +19,16 @@ impl<'a> Walker<'a> {
     /// Whether a splice whose text starts with an ASI hazard character —
     /// `(` from the receiver-detaching, unary-parenthesis or directive wraps,
     /// `-` from a bare negative — lands at the head of an expression
-    /// statement a preceding semicolonless statement would swallow as a
-    /// continuation. The original token there could never start one, so the
-    /// splice restores the boundary with a leading semicolon, like esbuild's
-    /// printer. Clause bodies (an `if`/`else`/loop head directly above) are
-    /// excluded: nothing precedes the statement there, and a semicolon would
-    /// itself become the clause body and skip the call.
+    /// statement. The original token there could never start one, so the
+    /// splice restores the boundary with a leading semicolon (an empty
+    /// statement, valid and behavior-neutral there), like esbuild's printer.
+    /// Deliberately conservative: a preceding statement is *assumed* not to
+    /// terminate safely, because whether it does cannot be judged from the
+    /// trailing source bytes — `}` may close an object/function/class
+    /// *expression* a call can continue, and a comment's last byte can spell
+    /// anything. Clause bodies (an `if`/`else`/loop head directly above) are
+    /// still excluded: nothing precedes the statement there, and a semicolon
+    /// would itself become the clause body and skip the call.
     pub(crate) fn statement_needs_leading_semicolon(
         &self,
         idx: u32,
@@ -64,18 +68,7 @@ impl<'a> Walker<'a> {
         {
             return false;
         }
-        // the boundary holds across `;` and a closed or opened block;
-        // anything else — an identifier, `)`, a string, even a comment's
-        // last byte — can continue into the hazard character
-        match self.src[..target.start as usize]
-            .bytes()
-            .rev()
-            .find(|byte| !byte.is_ascii_whitespace())
-        {
-            Some(b';' | b'}' | b'{') => false,
-            Some(_) => true,
-            None => false,
-        }
+        true
     }
 
     pub(crate) fn decorator_head(&self, idx: u32) -> Option<u32> {

@@ -285,7 +285,7 @@ describe('define', () => {
       // the leading semicolons replace esbuild's trailing ones: the splice
       // opens a statement the previous line would otherwise continue
       expect(output).toMatchInlineSnapshot(`
-        "(0, obj.method)()
+        ";(0, obj.method)()
         ;(0, obj.method)\`tpl\`
         ;(0, obj.method)?.()
         new obj.method()
@@ -324,7 +324,7 @@ describe('define', () => {
       })
       expect(output).toContain('("use strict")')
       expect(output).toMatchInlineSnapshot(`
-        "("use strict")
+        ";("use strict")
         const a = 1"
       `)
     })
@@ -365,7 +365,7 @@ describe('define', () => {
       const output = transpile('(flag)(); (flag)`t`;', { define: { flag: 'obj.method' } })
       expect(output).toContain('(0, obj.method)();')
       expect(output).toContain('(0, obj.method)`t`;')
-      expect(output).toMatchInlineSnapshot(`"(0, obj.method)(); (0, obj.method)\`t\`;"`)
+      expect(output).toMatchInlineSnapshot(`";(0, obj.method)(); ;(0, obj.method)\`t\`;"`)
     })
 
     it('parenthesizes a member-path string standing as a statement (audit round 2)', () => {
@@ -374,7 +374,7 @@ describe('define', () => {
       })
       expect(output).toContain('("use strict");')
       expect(output).toMatchInlineSnapshot(`
-        "("use strict");
+        ";("use strict");
         log(x)"
       `)
     })
@@ -415,7 +415,7 @@ describe('define', () => {
       // the optional call short-circuits: the argument never runs
       const calls = new Function(`var calls = 0; try { ${output} } catch {} return calls`)()
       expect(calls).toBe(0)
-      expect(output).toMatchInlineSnapshot(`"var calls = 0; try { (void 0)?.(++calls) } catch {} "`)
+      expect(output).toMatchInlineSnapshot(`"var calls = 0; try { ;(void 0)?.(++calls) } catch {} "`)
     })
 
     it('keeps escaped spellings out of JSX tags (audit round 8)', () => {
@@ -805,7 +805,7 @@ describe('define', () => {
       expect(output).toContain('2 ** void 0')
       expect(output).toContain('new (void 0)()')
       expect(output).toMatchInlineSnapshot(`
-        "(void 0) ** 2
+        ";(void 0) ** 2
         2 ** void 0
         new (void 0)()"
       `)
@@ -822,20 +822,20 @@ describe('define', () => {
       expect(output).toContain('(void 0) .x')
       expect(output).toContain('** 2')
       expect(output).toMatchInlineSnapshot(`
-        "(void 0) .x
+        ";(void 0) .x
         ;(void 0)  ** 2"
       `)
 
       const negated = transpile('FLAG! ** 2', { define: { FLAG: '-1' } })
       expect(negated).toContain('(-1)')
-      expect(negated).toMatchInlineSnapshot(`"(-1)  ** 2"`)
+      expect(negated).toMatchInlineSnapshot(`";(-1)  ** 2"`)
 
       const directive = transpile('FLAG as any;\nwith(x) {}', {
         define: { FLAG: '"use strict"' },
       })
       expect(directive).toContain('("use strict")')
       expect(directive).toMatchInlineSnapshot(`
-        "("use strict")       ;
+        ";("use strict")       ;
         with(x) {}"
       `)
     })
@@ -918,7 +918,7 @@ describe('define', () => {
       // through a wrapper the splice keeps the reference's own span, so the
       // erased wrapper stays around the detached text — valid, receiver off
       expect(output).toContain('((0, obj.method)       )();')
-      expect(output).toMatchInlineSnapshot(`"((0, obj.method)       )(); ((0, obj.method) )(); (0, obj.method)();"`)
+      expect(output).toMatchInlineSnapshot(`"((0, obj.method)       )(); ((0, obj.method) )(); ;(0, obj.method)();"`)
     })
 
     it('rewrites escaped undefined-rooted chains by root span (audit round 3)', () => {

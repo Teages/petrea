@@ -29,14 +29,31 @@ describe('define', () => {
         .toContain(';("x")')
     })
 
-    it('keeps the boundary where the splice cannot continue a statement', () => {
+    it('prefixes conservatively wherever a statement list precedes', () => {
       const dotted = { LOG: 'logger.log' } as Record<string, string>
-      // after `;`, after a closed block, at a block's head — and clause
-      // bodies, where a semicolon would become the body and skip the call
+      // whether the previous statement really terminates cannot be judged
+      // from trailing bytes — `}` may close an object/function/class
+      // expression and a comment may end in anything — so every
+      // statement-list head takes the semicolon, even after `;` or a block
       for (const source of [
+        'const config = {}\nLOG()',
+        'const f = function () {}\nLOG()',
+        'const C = class {}\nLOG()',
+        'start() // ;\nLOG()',
+        'start() // }\nLOG()',
         'a();\nLOG()',
         'function a() {}\nLOG()',
         '{\nLOG()\n}',
+      ]) {
+        expect(transpile(source, { define: dotted })).toContain(';(0, logger.log)')
+      }
+    })
+
+    it('keeps clause bodies and inner positions unprefixed', () => {
+      const dotted = { LOG: 'logger.log' } as Record<string, string>
+      // a semicolon in a clause body would become the body itself and skip
+      // the call; mid-statement positions never open the line
+      for (const source of [
         'if (x)\nLOG()',
         'if (x) b()\nelse LOG()',
         'while (c)\nLOG()',
