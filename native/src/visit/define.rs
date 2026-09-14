@@ -46,7 +46,11 @@ impl<'a> Walker<'a> {
         {
             return;
         }
-        if self.jsx_tag_violation(idx, value) {
+        // the splice text decides tag legality: an enum-member value
+        // qualifies to `<E.b/>`, a member tag and a component reference
+        // regardless of case
+        let text = self.splice_text(idx, value, span);
+        if self.jsx_tag_violation(idx, value, &text) {
             self.blanker.warn("define-jsx-tag", span);
             return;
         }
@@ -64,7 +68,6 @@ impl<'a> Walker<'a> {
             }
             _ => false,
         };
-        let text = self.splice_text(idx, value, span);
         // a destructured value is a write target — receiver detachment and
         // directive wrapping never apply inside it
         let (text, target) = if shorthand {
@@ -187,20 +190,27 @@ impl<'a> Walker<'a> {
             return;
         }
         let Some(value) = defines.this() else { return };
-        // a JSX tag position drops the nested-`this` barrier — esbuild's
+        // a bare `<this/>` tag is not a this reference: JSX lowering turns
+        // it into the string tag "this" (esbuild leaves it verbatim), while
+        // the object of a `<this.X/>` member tag is a real this the defines
+        // may replace
+        let tag = self.jsx_tag_position(idx);
+        if tag == Some(false) {
+            return;
+        }
+        // a member-tag root drops the nested-`this` barrier — esbuild's
         // JSX lowering runs ahead of its this-nesting check; ordinary
         // expressions keep it
-        let in_jsx_tag = self.jsx_tag_position(idx).is_some();
-        if (!in_jsx_tag && self.this_is_nested(idx))
+        if (tag.is_none() && self.this_is_nested(idx))
             || self.blanker.output.overlaps_pushed_range(span.start, span.end)
         {
             return;
         }
-        if self.jsx_tag_violation(idx, value) {
+        let spliced = self.splice_text(idx, value, span);
+        if self.jsx_tag_violation(idx, value, &spliced) {
             self.blanker.warn("define-jsx-tag", span);
             return;
         }
-        let spliced = self.splice_text(idx, value, span);
         // `this(...)` could never have been the identifier `eval`, so a bare
         // global `eval` value must splice as an indirect call
         let spliced = self.indirect_if_bare_eval(idx, value, spliced);
@@ -542,8 +552,10 @@ impl<'a> Walker<'a> {
     /// bare identifier splice starting lowercase would flip the component
     /// reference to an intrinsic string tag (`<component />`). A member-tag
     /// root (`<FLAG.X />`) and dotted splices (`<Comp.Box />`) are
-    /// references regardless of case.
-    fn jsx_tag_violation(&self, idx: u32, value: &DefineValue) -> bool {
+    /// references regardless of case — so the case test judges the final
+    /// spliced `text`, where an enum-member value already qualified to
+    /// `E.b` and cannot flip.
+    fn jsx_tag_violation(&self, idx: u32, value: &DefineValue, text: &str) -> bool {
         // `None` outside tag positions reads as "no violation"
         let Some(member_root) = self.jsx_tag_position(idx) else {
             return false;
@@ -551,16 +563,14 @@ impl<'a> Walker<'a> {
         // an escaped spelling (`\u0043omp`) cannot be spliced into a JSX
         // tag; `this` and `this.x` are the other valid tag spellings
         if !matches!(value.root, Some(ChainRoot::Ident(_)) | Some(ChainRoot::This))
-            || value.text.contains('\\')
+            || text.contains('\\')
         {
             return true;
         }
         // a bare lowercase-initial splice would flip the component to an
         // intrinsic string tag; a member-tag root or a dotted splice is a
         // reference regardless of case
-        !member_root
-            && !value.text.contains('.')
-            && value.text.starts_with(|c: char| c.is_ascii_lowercase())
+        !member_root && !text.contains('.') && text.starts_with(|c: char| c.is_ascii_lowercase())
     }
 
     /// Whether the reference is deleted as a bare identifier — `delete

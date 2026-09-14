@@ -976,6 +976,35 @@ describe('define', () => {
       ).toContain('return this.X')
     })
 
+    it('qualifies lowercase enum members in bare tags and keeps bare this tags (audit round 18)', () => {
+      // the tag-legality check judges the final spliced text: an
+      // enum-member value qualifies to `E.b` first, and a member tag is a
+      // component reference regardless of case — the warned keep used to
+      // leave `<FLAG/>`, which throws ReferenceError once lowered
+      const warns: string[] = []
+      expect(
+        transpile('enum E { b = obj, C = <FLAG/> }', {
+          define: { FLAG: 'b' },
+          lang: 'tsx' as never,
+          onWarn: w => warns.push(w.type),
+        }),
+      ).toContain('<E.b/>')
+      expect(warns).toEqual([])
+      // a bare lowercase splice that stays bare still warns and keeps
+      expect(transpile('<FLAG />', { define: { FLAG: 'component' }, lang: 'tsx' as never })).toContain(
+        '<FLAG />',
+      )
+      // a bare `<this/>` lowers to the string tag "this" — esbuild keeps it
+      // verbatim; only the object of a `<this.X/>` member tag is a real
+      // this reference the defines may replace
+      expect(
+        transpile('const x = <this/>;', { define: { this: 'Comp' }, lang: 'tsx' as never }),
+      ).toContain('const x = <this/>;')
+      expect(
+        transpile('const x = <this.X/>;', { define: { this: 'Comp' }, lang: 'tsx' as never }),
+      ).toContain('<Comp.X/>')
+    })
+
     it('qualifies enum-member values in JSX member tags (audit round 17)', () => {
       // an entity value whose root is an enum member splices qualified in
       // every other position; the JSX member-tag path spliced the bare text
@@ -1006,10 +1035,11 @@ describe('define', () => {
       expect(warns).toEqual([])
     })
 
-    it('applies the bare this define to JSX tags inside functions (audit round 12)', () => {
+    it('applies the bare this define to JSX member tags inside functions (audit round 12)', () => {
       // esbuild's JSX lowering runs ahead of its this-nesting check, so a
-      // bare `this` define reaches tags in any scope; ordinary expressions
-      // keep the barrier
+      // bare `this` define reaches member-tag roots in any scope; ordinary
+      // this expressions keep the barrier, and a bare `<this/>` tag is not
+      // a this reference at all (round 18)
       expect(
         transpile('function f() { return <this.X/> }', { define: { this: 'Comp' }, lang: 'tsx' as never }),
       ).toContain('return <Comp.X/>')
@@ -1018,7 +1048,7 @@ describe('define', () => {
       ).toContain('<Comp.X/>')
       expect(
         transpile('function f() { return <this/> }', { define: { this: 'Comp' }, lang: 'tsx' as never }),
-      ).toContain('return <Comp/>')
+      ).toContain('return <this/>')
       expect(
         transpile('function f() { return this.X }', { define: { this: 'Comp' } }),
       ).toContain('return this.X')
