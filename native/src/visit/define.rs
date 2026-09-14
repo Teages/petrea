@@ -31,9 +31,9 @@ use crate::visit::walk::Walker;
 impl<'a> Walker<'a> {
     /// Substitute one identifier reference against the single-segment define
     /// table. All guards must pass; otherwise the reference is left verbatim.
-    pub(crate) fn substitute_identifier_define(&mut self, idx: u32, name: &str, span: Span) {
+    pub(crate) fn substitute_identifier_define(&mut self, idx: u32, name: &'a str, span: Span) {
         let Some(defines) = self.defines else { return };
-        if self.try_jsx_member_tag_define(idx, ChainRoot::Ident(name.to_string())) {
+        if self.try_jsx_member_tag_define(idx, name) {
             return;
         }
         let Some(value) = defines.identifier(name) else { return };
@@ -86,9 +86,31 @@ impl<'a> Walker<'a> {
     /// `.Y`. Returns true when the site was handled — matched, or skipped
     /// with a warning; shadowed roots return false so the identifier path
     /// can reach its own verdict.
-    fn try_jsx_member_tag_define(&mut self, idx: u32, root: ChainRoot) -> bool {
-        let Some(defines) = self.defines else { return false };
-        // (member node, property) pairs from the root outward, inner first
+    fn try_jsx_member_tag_define(&mut self, idx: u32, root_name: &'a str) -> bool {
+        // scope guards before any splice, after the cheap parent walk
+        let Some((links, outermost)) = self.collect_jsx_member_links(idx) else {
+            return false;
+        };
+        if self.define_shadowed(idx, root_name) || self.inside_with(idx) {
+            return false;
+        }
+        self.jsx_member_tag_splice(idx, &links, outermost, ChainRoot::Ident(root_name.to_string()))
+    }
+
+    /// The `this`-rooted variant: `<this.X />` under a `this.X` key. No
+    /// scope guards — a JSX tag position drops the nested-`this` barrier
+    /// (esbuild's JSX lowering runs ahead of its this-nesting check).
+    fn try_jsx_this_member_tag_define(&mut self, idx: u32) -> bool {
+        let Some((links, outermost)) = self.collect_jsx_member_links(idx) else {
+            return false;
+        };
+        self.jsx_member_tag_splice(idx, &links, outermost, ChainRoot::This)
+    }
+
+    /// (member node, property) pairs from the root outward (inner first)
+    /// plus the outermost wrapper, when the reference roots a JSX member
+    /// tag.
+    fn collect_jsx_member_links(&self, idx: u32) -> Option<(Vec<(u32, String)>, u32)> {
         let mut links: Vec<(u32, String)> = Vec::new();
         let mut node = idx;
         loop {
@@ -98,23 +120,30 @@ impl<'a> Walker<'a> {
                     links.push((parent, member.property.name.as_str().to_string()));
                     node = parent;
                 }
-                AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_) => break,
-                _ => return false,
+                AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_) => {
+                    return Some((links, node))
+                }
+                _ => return None,
             }
         }
-        // scope guards before any splice: identifier roots resolve like
-        // anywhere else. `this` roots carry no nested barrier *in a JSX
-        // tag* — esbuild replaces `<this.X />` inside functions too (its
-        // JSX lowering runs ahead of the this-nesting check); ordinary
-        // `this.X` expressions keep the barrier
-        if let ChainRoot::Ident(name) = &root
-            && (self.define_shadowed(idx, name) || self.inside_with(idx))
-        {
-            return false;
-        }
+    }
+
+    /// The prefix loop shared by both roots.
+    fn jsx_member_tag_splice(
+        &mut self,
+        idx: u32,
+        links: &[(u32, String)],
+        outermost: u32,
+        root: ChainRoot,
+    ) -> bool {
+        let Some(defines) = self.defines else { return false };
         // longest prefix first
         for take in (1..=links.len()).rev() {
-            let chain: Vec<&str> = links[..take].iter().map(|(_, property)| property.as_str()).rev().collect();
+            let chain: Vec<&str> = links[..take]
+                .iter()
+                .map(|(_, property)| property.as_str())
+                .rev()
+                .collect();
             let Some(value) = defines.dotted(&chain, &root) else {
                 continue;
             };
@@ -136,6 +165,7 @@ impl<'a> Walker<'a> {
                 self.blanker.warn("define-jsx-tag", span);
                 return true;
             }
+            let _ = outermost;
             self.blanker
                 .output
                 .override_range_sorted(span.start, span.end, value.text.clone());
@@ -148,7 +178,7 @@ impl<'a> Walker<'a> {
     /// `this` qualifies — see [`Self::this_is_nested`].
     pub(crate) fn substitute_this_define(&mut self, idx: u32, span: Span) {
         let Some(defines) = self.defines else { return };
-        if self.try_jsx_member_tag_define(idx, ChainRoot::This) {
+        if self.try_jsx_this_member_tag_define(idx) {
             return;
         }
         let Some(value) = defines.this() else { return };
@@ -165,7 +195,8 @@ impl<'a> Walker<'a> {
             self.blanker.warn("define-jsx-tag", span);
             return;
         }
-        let (text, target) = self.detached(idx, span, value, self.splice_text(idx, value, span));
+        let spliced = self.splice_text(idx, value, span);
+        let (text, target) = self.detached(idx, span, value, spliced);
         let text = self.wrap_directive(idx, value, text);
         self.blanker
             .output
@@ -179,7 +210,8 @@ impl<'a> Walker<'a> {
         if self.blanker.output.overlaps_pushed_range(span.start, span.end) {
             return;
         }
-        let (text, target) = self.detached(idx, span, value, self.splice_text(idx, value, span));
+        let spliced = self.splice_text(idx, value, span);
+        let (text, target) = self.detached(idx, span, value, spliced);
         let text = self.wrap_directive(idx, value, text);
         self.blanker
             .output
@@ -212,7 +244,7 @@ impl<'a> Walker<'a> {
         // identifier reference, `this` (top level only) or `import.meta`
         let mut chain: Vec<&str> = Vec::new();
         let mut node = idx;
-        let root;
+        let root: (u32, Option<&'a str>, ChainRootKind);
         loop {
             if chain.len() > limit {
                 return false;
@@ -233,39 +265,61 @@ impl<'a> Walker<'a> {
                     node = self.unwrap_down(node_index_of(&member.object));
                 }
                 AstKind::IdentifierReference(reference) => {
-                    root = (node, ChainRoot::Ident(reference.name.as_str().to_string()));
+                    root = (node, Some(reference.name.as_str()), ChainRootKind::Ident);
                     break;
                 }
                 AstKind::ThisExpression(_) => {
-                    root = (node, ChainRoot::This);
+                    root = (node, None, ChainRootKind::This);
                     break;
                 }
                 AstKind::ImportMeta(_) => {
-                    root = (node, ChainRoot::ImportMeta);
+                    root = (node, None, ChainRootKind::ImportMeta);
                     break;
                 }
                 _ => return false,
             }
         }
-        let (root_idx, ref root_kind) = root;
-        let Some(value) = defines.dotted(&chain, root_kind) else { return false };
+        let (root_idx, root_name, root_kind) = root;
         let span = self.node_kind(idx).span();
         // identifier roots resolve through the scope model; a `this` root
         // only exists at top level
         let root_blocked = match root_kind {
-            ChainRoot::Ident(name) => {
-                self.define_shadowed(root_idx, name) || self.inside_with(root_idx)
+            ChainRootKind::Ident => {
+                self.define_shadowed(root_idx, root_name.expect("identifier root"))
+                    || self.inside_with(root_idx)
             }
-            ChainRoot::This => self.this_is_nested(root_idx),
-            ChainRoot::ImportMeta => false,
+            ChainRootKind::This => self.this_is_nested(root_idx),
+            ChainRootKind::ImportMeta => false,
         };
+        let root = match root_kind {
+            ChainRootKind::Ident => {
+                ChainRoot::Ident(root_name.expect("identifier root").to_string())
+            }
+            ChainRootKind::This => ChainRoot::This,
+            ChainRootKind::ImportMeta => ChainRoot::ImportMeta,
+        };
+        let Some(value) = defines.dotted(&chain, &root) else { return false };
         if root_blocked || self.define_blocked(idx, span, value) {
             return false;
         }
         // no receiver detachment here: the original was already a member
         // access — a receiver call — and esbuild keeps it one (only a call
-        // that was *not* a property access gets detached when its splice is)
-        let text = self.wrap_directive(idx, value, self.splice_text(idx, value, span));
+        // that was *not* a property access gets detached when its splice is).
+        // The exception is a bare `eval` value: the original call was
+        // indirect by construction, and splicing `eval(...)` bare would make
+        // it direct — evaluating in the enclosing scope instead of global
+        let mut text = self.splice_text(idx, value, span);
+        if matches!(&value.root, Some(ChainRoot::Ident(root)) if root == "eval")
+            && !value.dotted
+            && matches!(self.name_binding(idx, "eval"), NameBinding::Global)
+        {
+            let (top, _) = self.unwrap_up(idx);
+            let parent = self.parent_of(top);
+            if parent != u32::MAX && self.is_call_or_tag_callee(top, parent) {
+                text = format!("(0, {text})");
+            }
+        }
+        let text = self.wrap_directive(idx, value, text);
         self.blanker.output.override_range_sorted(span.start, span.end, text);
         true
     }
@@ -275,26 +329,23 @@ impl<'a> Walker<'a> {
     /// reference when the whole wrapper chain is parens; non-detaching
     /// splices cover the reference's own span.
     fn detached(
-        &self,
+        &mut self,
         idx: u32,
         span: Span,
         value: &DefineValue,
         text: String,
     ) -> (String, Span) {
-        if !value.dotted {
-            return (text, span);
-        }
         let (top, only_parens) = self.unwrap_up(idx);
         let parent = self.parent_of(top);
-        if parent == u32::MAX {
+        if parent == u32::MAX || !self.is_call_or_tag_callee(top, parent) {
             return (text, span);
         }
-        let start = self.node_kind(top).span().start;
-        let is_callee = matches!(self.node_kind(parent),
-            AstKind::CallExpression(call) if call.callee.span().start == start)
-            || matches!(self.node_kind(parent),
-                AstKind::TaggedTemplateExpression(tag) if tag.tag.span().start == start);
-        if !is_callee {
+        // a bare `eval` value in call position must stay indirect — direct
+        // eval would evaluate in the enclosing scope instead of global
+        let bare_eval = !value.dotted
+            && matches!(&value.root, Some(ChainRoot::Ident(name)) if name == "eval")
+            && matches!(self.name_binding(idx, "eval"), NameBinding::Global);
+        if !value.dotted && !bare_eval {
             return (text, span);
         }
         // claiming the wrapper span requires every link to be a plain paren;
@@ -306,6 +357,16 @@ impl<'a> Walker<'a> {
             format!("(0, {text})"),
             if claimable { self.node_kind(top).span() } else { span },
         )
+    }
+
+    /// Whether `top` (an unwrapped node) is the callee/tag of the call or
+    /// tagged template at `parent`.
+    fn is_call_or_tag_callee(&self, top: u32, parent: u32) -> bool {
+        let start = self.node_kind(top).span().start;
+        matches!(self.node_kind(parent),
+            AstKind::CallExpression(call) if call.callee.span().start == start)
+            || matches!(self.node_kind(parent),
+                AstKind::TaggedTemplateExpression(tag) if tag.tag.span().start == start)
     }
 
     /// The effective expression context of a reference after erasure: skips
@@ -493,6 +554,11 @@ impl<'a> Walker<'a> {
     /// through error recovery even in TS/module inputs — where a name may
     /// bind to the with object dynamically.
     fn inside_with(&self, mut idx: u32) -> bool {
+        // recovered-parse `with` is rare: a whole-file scan at prepare time
+        // lets every reference skip the ancestor walk entirely
+        if !self.has_with {
+            return false;
+        }
         loop {
             let parent = self.parent_of(idx);
             if parent == u32::MAX {
@@ -553,7 +619,7 @@ impl<'a> Walker<'a> {
     /// Whether any scope from the node outward binds `name`, in which case
     /// the reference reads that binding at runtime instead of a defined
     /// global (see [`name_binding`] for what counts).
-    fn define_shadowed(&self, idx: u32, name: &str) -> bool {
+    fn define_shadowed(&mut self, idx: u32, name: &'a str) -> bool {
         !matches!(self.name_binding(idx, name), NameBinding::Global)
     }
 
@@ -605,7 +671,7 @@ impl<'a> Walker<'a> {
     /// the same qualification the enum emitter gives bare member refs).
     /// Unary-precedence and fusion hazards are guarded by position, not
     /// adjacency (see [`context_needs_unary_parens`]).
-    fn splice_text(&self, idx: u32, value: &DefineValue, span: Span) -> String {
+    fn splice_text(&mut self, idx: u32, value: &'a DefineValue, span: Span) -> String {
         let text = match &value.root {
             Some(ChainRoot::Ident(root)) => match self.name_binding(idx, root) {
                 NameBinding::EnumMember(enum_name) => format!("{enum_name}.{}", value.text),
@@ -642,7 +708,8 @@ impl<'a> Walker<'a> {
 
 /// What a name resolves to from a position outward, through the same tables
 /// the enum pipeline registers.
-enum NameBinding {
+#[derive(Clone)]
+pub(crate) enum NameBinding {
     /// no binding anywhere — the reference reads a global
     Global,
     /// an ordinary runtime binding (parameter, `var`/`let`/`const`, catch
@@ -655,37 +722,53 @@ enum NameBinding {
     EnumMember(String),
 }
 
-impl Walker<'_> {
-    fn name_binding(&self, idx: u32, name: &str) -> NameBinding {
+impl<'a> Walker<'a> {
+    /// What `name` resolves to from `idx`'s scope outward. Bindings are
+    /// frozen after the prepare pass, so resolutions are memoized per
+    /// (scope, name): deep nesting pays each scope once per name instead
+    /// of once per reference.
+    fn name_binding(&mut self, idx: u32, name: &'a str) -> NameBinding {
         if self.node_scope.is_empty() {
             return NameBinding::Global;
         }
+        self.scope_binding(self.node_scope(idx), name)
+    }
+
+    fn scope_binding(&mut self, scope: u32, name: &'a str) -> NameBinding {
+        let key = (scope, name);
+        if let Some(cached) = self.binding_cache.get(&key) {
+            return cached.clone();
+        }
+        let resolved = self.resolve_scope_binding(scope, name);
+        self.binding_cache.insert(key, resolved.clone());
+        resolved
+    }
+
+    fn resolve_scope_binding(&mut self, scope: u32, name: &'a str) -> NameBinding {
         // most define-active files declare no enums: skip the member lookup
         // (and its UTF-16 allocation) entirely
         let enum_scopes = (!self.enum_members.is_empty())
             .then(|| &self.const_bindings.enum_scopes);
-        let units: Option<Vec<u16>> = enum_scopes
-            .is_some()
-            .then(|| name.encode_utf16().collect());
-        let mut scope = self.node_scope(idx);
-        loop {
-            if let (Some(scopes), Some(units)) = (enum_scopes, units.as_ref())
-                && let Some(group) = scopes.get(&scope)
+        if let Some(scopes) = enum_scopes {
+            let units: Vec<u16> = name.encode_utf16().collect();
+            if let Some(group) = scopes.get(&scope)
                 && self
                     .enum_members
                     .get(group)
-                    .is_some_and(|members| members.names.contains(units))
+                    .is_some_and(|members| members.names.contains(&units))
             {
                 return NameBinding::EnumMember(group.1.clone());
             }
-            if self.const_bindings.binding_at(scope, name).is_some() {
-                return NameBinding::Local;
-            }
-            if scope == 0 {
-                return NameBinding::Global;
-            }
-            scope = scope_above(self, scope);
         }
+        if self.const_bindings.binding_at(scope, name).is_some() {
+            return NameBinding::Local;
+        }
+        if scope == 0 {
+            return NameBinding::Global;
+        }
+        // the parent resolution goes through the memo, so a chain walks
+        // each scope once per name across the whole file
+        self.scope_binding(scope_above(self, scope), name)
     }
 }
 
@@ -702,6 +785,14 @@ fn unwrap_expression<'a>(mut expression: &'a Expression<'a>) -> &'a Expression<'
             _ => return expression,
         };
     }
+}
+
+/// Which root flavor a collected chain bottomed out at.
+#[derive(Clone, Copy)]
+enum ChainRootKind {
+    Ident,
+    This,
+    ImportMeta,
 }
 
 /// The flat index of an AST-held expression child (node ids were assigned by

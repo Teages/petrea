@@ -997,6 +997,29 @@ describe('define', () => {
       )
     })
 
+    it('keeps spliced eval calls indirect (audit round 14)', () => {
+      const member = transpile(
+        'function f() {\n  const secret = 123;\n  return api.eval("typeof secret");\n}\nglobalThis.result = f()',
+        { define: { 'api.eval': 'eval' } },
+      )
+      expect(member).toContain('(0, eval)')
+      new Function(member)()
+      // indirect eval evaluates in global scope: `secret` is invisible there
+      expect(globalThis.result).toBe('undefined')
+
+      const identifier = transpile(
+        'function g() { const s = 1; return call("typeof s") }\nglobalThis.result = g()',
+        { define: { call: 'eval' } },
+      )
+      expect(identifier).toContain('(0, eval)')
+      new Function(identifier)()
+      expect(globalThis.result).toBe('undefined')
+    })
+
+    it('rejects member chains rooted at a literal (audit round 14)', () => {
+      expect(() => transpile('log(x)', { define: { x: '1 .x' } })).toThrow()
+    })
+
     it('reports warning offsets in UTF-16 units (audit round 9)', () => {
       const warnings: Array<{ start: number, end: number }> = []
       const output = transpile('const x=\"中\"; <FLAG />', {

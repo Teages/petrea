@@ -90,8 +90,8 @@ fn resolve_filename(options: Option<&TranspileNativeOptions>) -> String {
     })
 }
 
-fn resolve_defines(options: Option<&TranspileNativeOptions>) -> Option<std::collections::HashMap<String, String>> {
-    options.and_then(|o| o.define.clone())
+fn resolve_defines(options: Option<TranspileNativeOptions>) -> Option<std::collections::HashMap<String, String>> {
+    options.and_then(|o| o.define)
 }
 
 /// The API contract (`types.ts`) promises JS string indices (UTF-16 code
@@ -166,7 +166,7 @@ pub fn transpile_async(
     options: Option<TranspileNativeOptions>,
 ) -> AsyncTask<TranspileTask> {
     let filename = resolve_filename(options.as_ref());
-    let defines = resolve_defines(options.as_ref());
+    let defines = resolve_defines(options);
     AsyncTask::new(TranspileTask { input, filename, defines })
 }
 
@@ -177,7 +177,7 @@ pub fn transpile_native_sync(
     options: Option<TranspileNativeOptions>,
 ) -> Result<TranspileNativeResult> {
     let filename = resolve_filename(options.as_ref());
-    let defines = resolve_defines(options.as_ref());
+    let defines = resolve_defines(options);
     to_napi_result(transpile::transpile_caught(input, &filename, defines.as_ref()))
 }
 
@@ -362,7 +362,7 @@ pub fn transpile_utf16_async(
     options: Option<TranspileNativeOptions>,
 ) -> AsyncTask<TranspileUnitsTask> {
     let filename = resolve_filename(options.as_ref());
-    let defines = resolve_defines(options.as_ref());
+    let defines = resolve_defines(options);
     let units = units.to_vec();
     AsyncTask::new(TranspileUnitsTask { units, filename, defines })
 }
@@ -374,7 +374,7 @@ pub fn transpile_utf16_sync(
     options: Option<TranspileNativeOptions>,
 ) -> Result<TranspileUnitsResult> {
     let filename = resolve_filename(options.as_ref());
-    let defines = resolve_defines(options.as_ref());
+    let defines = resolve_defines(options);
     // one copy into an owned buffer — the output side reuses it in place
     to_napi_units_result(transpile::transpile_units_caught(
         units.to_vec(),

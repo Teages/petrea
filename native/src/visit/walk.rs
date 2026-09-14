@@ -317,6 +317,13 @@ pub struct Walker<'a> {
     /// esbuild-style defines; `None` on every define-free transpile, so all
     /// substitution paths early-out and the walk is unchanged.
     pub(crate) defines: Option<&'a crate::defines::Defines>,
+    /// Whether any `with` statement exists (recovered parses included) —
+    /// lets `inside_with` skip its ancestor walk on the common file.
+    pub(crate) has_with: bool,
+    /// Memoized (scope, name) → binding resolutions; bindings freeze after
+    /// the prepare pass, so entries stay valid for the whole walk. A plain
+    /// map (no interior mutability) keeps `Walker` covariant over `'a`.
+    pub(crate) binding_cache: std::collections::HashMap<(u32, &'a str), crate::visit::define::NameBinding>,
 }
 
 /// Two tiers: parents are cheap and every enum-declaring file gets them; the
@@ -394,6 +401,8 @@ pub fn blank_program<'a>(
         parent: Vec::new(),
         node_scope: Vec::new(),
         defines,
+        has_with: false,
+        binding_cache: std::collections::HashMap::new(),
     };
 
     // directives are prepended to the statement list (statement-like, not a function body)
@@ -406,6 +415,12 @@ pub fn blank_program<'a>(
     }
     if !enum_indices.is_empty() || defines.is_some_and(|d| !d.is_empty()) {
         prepare_enum_tables(&mut walker, &enum_indices);
+        if defines.is_some() {
+            walker.has_with = walker
+                .nodes
+                .iter()
+                .any(|kind| matches!(kind, AstKind::WithStatement(_)));
+        }
     }
     walker.visit_node_array(&indices, true, false);
 
@@ -447,6 +462,8 @@ pub fn blank_program_utf16<'a>(
         parent: Vec::new(),
         node_scope: Vec::new(),
         defines,
+        has_with: false,
+        binding_cache: std::collections::HashMap::new(),
     };
 
     let mut indices = Vec::with_capacity(program.directives.len() + program.body.len());
@@ -458,6 +475,12 @@ pub fn blank_program_utf16<'a>(
     }
     if !enum_indices.is_empty() || defines.is_some_and(|d| !d.is_empty()) {
         prepare_enum_tables(&mut walker, &enum_indices);
+        if defines.is_some() {
+            walker.has_with = walker
+                .nodes
+                .iter()
+                .any(|kind| matches!(kind, AstKind::WithStatement(_)));
+        }
     }
     walker.visit_node_array(&indices, true, false);
 

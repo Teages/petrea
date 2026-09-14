@@ -234,6 +234,12 @@ fn parse_value(value: &str, allocator: &Allocator) -> Result<DefineValue, String
     }
     let negative = false;
     let root = entity_root(&parsed).ok_or_else(|| invalid.clone())?;
+    // a member chain must bottom out at an identifier, `this` or
+    // `import.meta` — esbuild's entity check rejects `1 .x`, and a literal
+    // root is not an entity
+    if root.is_none() && chain_depth(&parsed) > 0 {
+        return Err(invalid);
+    }
     let numeric = negative || matches!(parsed, Expression::NumericLiteral(_));
     let string = matches!(parsed, Expression::StringLiteral(_));
     let depth = chain_depth(&parsed);
