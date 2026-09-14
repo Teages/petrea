@@ -123,6 +123,17 @@ impl Defines {
         roots
     }
 
+    /// Whether any value is an entity rooted at a bare identifier — the only
+    /// shape whose splice consults the binding registry (enum-member
+    /// qualification through [`crate::visit::define`]). Literal-only defines
+    /// never resolve a name, so enum-declaring files can skip the model for
+    /// them exactly like enum-free ones.
+    pub(crate) fn has_entity_values(&self) -> bool {
+        self.values.iter().any(|value| {
+            matches!(&value.root, Some(ChainRoot::Ident(_)))
+        })
+    }
+
     /// The longest multi-segment key ending in `tail`, if any — the chain
     /// builder stops after that many segments, and callers with no candidate
     /// for their outermost property skip chain building entirely.

@@ -477,7 +477,11 @@ pub fn blank_program<'a>(
                 let (has_with, relevant_bound) =
                     scan_define_gates(&walker.nodes, &defines.relevant_roots());
                 walker.has_with = has_with;
-                !enum_indices.is_empty() || relevant_bound
+                // a bound relevant name needs the precise shadow walk; enums
+                // matter only for entity values, whose splices qualify
+                // through enum member scopes — literal-only defines never
+                // resolve a name and skip the model on enum files too
+                relevant_bound || (!enum_indices.is_empty() && defines.has_entity_values())
             }
             _ => false,
         };
@@ -545,7 +549,11 @@ pub fn blank_program_utf16<'a>(
                 let (has_with, relevant_bound) =
                     scan_define_gates(&walker.nodes, &defines.relevant_roots());
                 walker.has_with = has_with;
-                !enum_indices.is_empty() || relevant_bound
+                // a bound relevant name needs the precise shadow walk; enums
+                // matter only for entity values, whose splices qualify
+                // through enum member scopes — literal-only defines never
+                // resolve a name and skip the model on enum files too
+                relevant_bound || (!enum_indices.is_empty() && defines.has_entity_values())
             }
             _ => false,
         };
