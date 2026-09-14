@@ -45,9 +45,9 @@ impl BlankString {
     /// position among the pushed ranges: the enum walk erases an initializer
     /// first and collects reference rewrites second, and out-of-order ranges
     /// would corrupt [`build`](Self::build).
-    pub fn override_range_sorted(&mut self, start: u32, end: u32, text: impl AsRef<str>) {
+    pub fn override_range_sorted(&mut self, start: u32, end: u32, text: String) {
         let index = self.texts.len() as u32;
-        self.texts.push(SpliceText::Str(text.as_ref().to_string()));
+        self.texts.push(SpliceText::Str(text));
         let at = self
             .ranges
             .partition_point(|&(_, range_start, _, _)| range_start <= start);
