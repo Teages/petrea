@@ -203,6 +203,62 @@ describe('define', () => {
   })
 
   describe('shadowing', () => {
+    it('skips references a parameter shadows on an enum-declaring file', () => {
+      // enum files forgo the bound-name fast path (member scopes are
+      // invisible to the binding scan), so their shadow checks must still
+      // run against the precise model — the gate's bound list triggers it
+      const output = transpile(
+        [
+          'enum E { A }',
+          'function f(FLAG) { return FLAG }',
+          'f(7)',
+        ].join('\n'),
+        { define: { FLAG: '1' } },
+      )
+      expect(output).toContain('function f(FLAG) { return FLAG }')
+      expect(output).not.toContain('return 1')
+    })
+
+    it('skips references a parameter shadows with only an empty ambient enum', () => {
+      const output = transpile(
+        [
+          'declare enum E1 {}',
+          'function f(FLAG) { return FLAG }',
+          'f(7)',
+        ].join('\n'),
+        { define: { FLAG: '1' } },
+      )
+      expect(output).toContain('function f(FLAG) { return FLAG }')
+    })
+
+    it('qualifies member references when a define key matches a member name', () => {
+      const output = transpile(
+        'enum E { A, B = f(A) }\nlog(A)',
+        { define: { A: '1' } },
+      )
+      expect(output).toContain('f(E.A)')
+      expect(output).toContain('log(1)')
+      expect(output).not.toContain('f(1)')
+    })
+
+    it('qualifies computed-string member references under a matching key', () => {
+      const output = transpile(
+        'enum E { ["FLAG"], B = g(FLAG) }',
+        { define: { FLAG: '1' } },
+      )
+      expect(output).toContain('g(E.FLAG)')
+      expect(output).not.toContain('g(1)')
+    })
+
+    it('still replaces global references on enum files whose members do not collide', () => {
+      const output = transpile(
+        'enum E { A }\nlog(FLAG)',
+        { define: { FLAG: '1' } },
+      )
+      expect(output).toContain('log(1)')
+      expect(output).not.toContain('log(FLAG)')
+    })
+
     it('skips references a block-scoped binding shadows', () => {
       const output = transpile(
         [

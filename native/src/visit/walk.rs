@@ -179,6 +179,30 @@ impl<'a, const GATED: bool> Visit<'a> for Flattener<'a, GATED> {
                         self.gates.bound.push(name);
                     }
                 }
+                AstKind::TSEnumMember(member) => {
+                    // enum member scopes bind their member names without a
+                    // BindingIdentifier, so the scan above cannot see them;
+                    // a relevant name matching any member (or an undecodable
+                    // computed one) must keep the precise model
+                    let collides = match &member.id {
+                        TSEnumMemberName::Identifier(id) => {
+                            starts_relevant(id.name.as_str(), &self.gate_firsts)
+                                && self.gate_relevant.as_ref().is_some_and(|roots| {
+                                    roots.iter().any(|root| *root == id.name.as_str())
+                                })
+                        }
+                        TSEnumMemberName::String(literal)
+                        | TSEnumMemberName::ComputedString(literal) => {
+                            let value = literal.value.as_str();
+                            starts_relevant(value, &self.gate_firsts)
+                                && self.gate_relevant.as_ref().is_some_and(|roots| {
+                                    roots.iter().any(|root| *root == value)
+                                })
+                        }
+                        TSEnumMemberName::ComputedTemplateString(_) => true,
+                    };
+                    self.gates.member_relevant |= collides;
+                }
                 _ => {}
             }
         }
@@ -642,6 +666,11 @@ pub(crate) struct DefineGates<'a> {
     pub(crate) has_with: bool,
     pub(crate) has_jsx: bool,
     pub(crate) bound: Vec<&'a str>,
+    /// Whether any enum member's name collides with a relevant root (or is an
+    /// undecodable computed one): bare references inside an enum's member
+    /// scope resolve through its members — invisible to the binding scan —
+    /// so the precise model must stay on for that file.
+    pub(crate) member_relevant: bool,
 }
 
 /// Iterator over the linked-list children of a node, in visit order.
@@ -680,6 +709,14 @@ pub fn blank_program<'a>(
     let enum_indices = flat.enum_indices;
     let gates = flat.gates;
     let relevant = flat.relevant;
+    // `gates.bound` stays collected on enum files (their `bound_relevant`
+    // fast path is None for the member-scope caveat) — the model decision
+    // reads it directly, plus the member-name collision flag: either one
+    // means a define decision can still turn on a precise resolution
+    let defines_need_model = !gates.bound.is_empty()
+        || gates.member_relevant
+        || (!enum_indices.is_empty() && defines.is_some_and(|d| d.has_entity_values()));
+    let define_name_filter = (defines_need_model && enum_indices.is_empty()).then_some(relevant);
 
     let mut walker = Walker {
         src,
@@ -715,17 +752,6 @@ pub fn blank_program<'a>(
         indices.push(statement_index(stmt));
     }
     if !enum_indices.is_empty() || defines_active {
-        // a bound relevant name needs the precise shadow walk; enums matter
-        // only for entity values, whose splices qualify through enum member
-        // scopes — literal-only defines never resolve a name and skip the
-        // model on enum files too. The registry then serves define
-        // resolutions only: names outside the relevant set never join it.
-        let defines_need_model = walker
-            .bound_relevant
-            .as_ref()
-            .is_some_and(|bound| !bound.is_empty())
-            || (!enum_indices.is_empty() && defines.is_some_and(|d| d.has_entity_values()));
-        let define_name_filter = (defines_need_model && enum_indices.is_empty()).then_some(relevant);
         prepare_enum_tables(
             &mut walker,
             &enum_indices,
@@ -758,6 +784,14 @@ pub fn blank_program_utf16<'a>(
     let enum_indices = flat.enum_indices;
     let gates = flat.gates;
     let relevant = flat.relevant;
+    // `gates.bound` stays collected on enum files (their `bound_relevant`
+    // fast path is None for the member-scope caveat) — the model decision
+    // reads it directly, plus the member-name collision flag: either one
+    // means a define decision can still turn on a precise resolution
+    let defines_need_model = !gates.bound.is_empty()
+        || gates.member_relevant
+        || (!enum_indices.is_empty() && defines.is_some_and(|d| d.has_entity_values()));
+    let define_name_filter = (defines_need_model && enum_indices.is_empty()).then_some(relevant);
 
     let mut walker = Walker {
         src: parse_copy,
@@ -792,17 +826,6 @@ pub fn blank_program_utf16<'a>(
         indices.push(statement_index(stmt));
     }
     if !enum_indices.is_empty() || defines_active {
-        // a bound relevant name needs the precise shadow walk; enums matter
-        // only for entity values, whose splices qualify through enum member
-        // scopes — literal-only defines never resolve a name and skip the
-        // model on enum files too. The registry then serves define
-        // resolutions only: names outside the relevant set never join it.
-        let defines_need_model = walker
-            .bound_relevant
-            .as_ref()
-            .is_some_and(|bound| !bound.is_empty())
-            || (!enum_indices.is_empty() && defines.is_some_and(|d| d.has_entity_values()));
-        let define_name_filter = (defines_need_model && enum_indices.is_empty()).then_some(relevant);
         prepare_enum_tables(
             &mut walker,
             &enum_indices,
