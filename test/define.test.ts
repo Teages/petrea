@@ -976,6 +976,36 @@ describe('define', () => {
       ).toContain('return this.X')
     })
 
+    it('qualifies enum-member values in JSX member tags (audit round 17)', () => {
+      // an entity value whose root is an enum member splices qualified in
+      // every other position; the JSX member-tag path spliced the bare text
+      // and emitted `<B/>`, which throws ReferenceError once lowered
+      expect(
+        transpile('enum E { B = obj, C = <FLAG.X/> }', {
+          define: { 'FLAG.X': 'B' },
+          lang: 'tsx' as never,
+        }),
+      ).toContain('<E.B/>')
+      // prefix matches keep their suffix, still qualified
+      expect(
+        transpile('enum E { B = obj, C = <FLAG.X.Y/> }', {
+          define: { 'FLAG.X': 'B' },
+          lang: 'tsx' as never,
+        }),
+      ).toContain('<E.B.Y/>')
+      // the this-rooted variant qualifies too; a qualified lowercase member
+      // is a component reference, not an intrinsic flip, so no warning
+      const warns: string[] = []
+      expect(
+        transpile('enum E { b = obj, C = <this.X/> }', {
+          define: { 'this.X': 'b' },
+          lang: 'tsx' as never,
+          onWarn: w => warns.push(w.type),
+        }),
+      ).toContain('<E.b/>')
+      expect(warns).toEqual([])
+    })
+
     it('applies the bare this define to JSX tags inside functions (audit round 12)', () => {
       // esbuild's JSX lowering runs ahead of its this-nesting check, so a
       // bare `this` define reaches tags in any scope; ordinary expressions

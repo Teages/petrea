@@ -149,15 +149,20 @@ impl<'a> Walker<'a> {
             };
             let end = self.node_kind(links[take - 1].0).span().end;
             let span = Span::new(self.node_kind(idx).span().start, end);
+            // the value goes through the shared splice pipeline: an entity
+            // value whose root is an enum member splices qualified (`<E.B/>`
+            // — the members live on the enum object, not in lexical scope),
+            // like every other replacement site
+            let text = self.splice_text(idx, value, span);
             // when the splice keeps a property suffix the result stays a
             // member tag — a component reference regardless of case; only a
-            // whole-name splice is judged on the value text alone, where a
-            // bare lowercase (or bare `this`) result flips to an intrinsic
+            // whole-name splice is judged on the final tag text alone, where
+            // a bare lowercase (or bare `this`) result flips to an intrinsic
             // and literals/escapes cannot be tags at all
             let whole_name = take == links.len();
             let result_flips = whole_name
-                && !value.text.contains('.')
-                && value.text.starts_with(|c: char| c.is_ascii_lowercase());
+                && !text.contains('.')
+                && text.starts_with(|c: char| c.is_ascii_lowercase());
             if !matches!(value.root, Some(ChainRoot::Ident(_)) | Some(ChainRoot::This))
                 || value.text.contains('\\')
                 || result_flips
@@ -168,7 +173,7 @@ impl<'a> Walker<'a> {
             let _ = outermost;
             self.blanker
                 .output
-                .override_range_sorted(span.start, span.end, value.text.clone());
+                .override_range_sorted(span.start, span.end, text);
             return true;
         }
         false
