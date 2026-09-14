@@ -4,6 +4,15 @@ const REPLACE_WITH_CLOSE_PAREN: u8 = 2;
 const REPLACE_WITH_SEMI: u8 = 3;
 const REPLACE_WITH_TEXT: u8 = 4;
 
+/// An override text: kept as the string it came from on the String path,
+/// and encoded only for the lossless UTF-16 path — a Rust `String` can
+/// never hold raw lone surrogates, so only the units caller needs that
+/// form, and `build` skips a UTF-16 round trip for every splice.
+enum SpliceText {
+    Str(String),
+    Units(Vec<u16>),
+}
+
 /// Like magic-string, restricted to two features: blanking ranges (newlines
 /// preserved so line/column stay stable) and literal overwrites (enum
 /// expansion, grouping parens).
@@ -11,20 +20,15 @@ const REPLACE_WITH_TEXT: u8 = 4;
 pub struct BlankString {
     /// Flat (flags, start, end, textIndex) tuples, pushed in source order.
     ranges: Vec<(u8, u32, u32, u32)>,
-    /// Override texts as UTF-16 units — the only lossless form shared by the
-    /// String and UTF-16 paths (raw lone surrogates must survive).
-    texts: Vec<Vec<u16>>,
+    texts: Vec<SpliceText>,
 }
 
 impl BlankString {
     /// Replace [start, end) with `text`; `end` may equal `start` to insert.
     pub fn override_range(&mut self, start: u32, end: u32, text: impl AsRef<str>) {
-        self.override_range_units(
-            start,
-            end,
-            "",
-            &text.as_ref().encode_utf16().collect::<Vec<u16>>(),
-        );
+        let index = self.texts.len() as u32;
+        self.texts.push(SpliceText::Str(text.as_ref().to_string()));
+        self.ranges.push((REPLACE_WITH_TEXT, start, end, index));
     }
 
     /// [`override_range`](Self::override_range) with the replacement given as
@@ -33,7 +37,7 @@ impl BlankString {
         let index = self.texts.len() as u32;
         let mut text: Vec<u16> = prefix.encode_utf16().collect();
         text.extend_from_slice(units);
-        self.texts.push(text);
+        self.texts.push(SpliceText::Units(text));
         self.ranges.push((REPLACE_WITH_TEXT, start, end, index));
     }
 
@@ -43,7 +47,7 @@ impl BlankString {
     /// would corrupt [`build`](Self::build).
     pub fn override_range_sorted(&mut self, start: u32, end: u32, text: impl AsRef<str>) {
         let index = self.texts.len() as u32;
-        self.texts.push(text.as_ref().encode_utf16().collect());
+        self.texts.push(SpliceText::Str(text.as_ref().to_string()));
         let at = self
             .ranges
             .partition_point(|&(_, range_start, _, _)| range_start <= start);
@@ -92,7 +96,10 @@ impl BlankString {
         let mut extra = 0usize;
         for &(flags, start, end, text_index) in ranges {
             if flags == REPLACE_WITH_TEXT {
-                let len = self.texts[text_index as usize].len();
+                let len = match &self.texts[text_index as usize] {
+                    SpliceText::Str(text) => text.len(),
+                    SpliceText::Units(units) => units.len(),
+                };
                 extra += len.saturating_sub((end - start) as usize);
             }
         }
@@ -106,11 +113,14 @@ impl BlankString {
 
             let mut range_start = range_start;
             match flags {
-                REPLACE_WITH_TEXT => out.extend_from_slice(
-                    String::from_utf16(&self.texts[text_index as usize])
-                        .expect("String-path texts are valid UTF-16")
-                        .as_bytes(),
-                ),
+                REPLACE_WITH_TEXT => match &self.texts[text_index as usize] {
+                    SpliceText::Str(text) => out.extend_from_slice(text.as_bytes()),
+                    SpliceText::Units(units) => out.extend_from_slice(
+                        String::from_utf16(units)
+                            .expect("String-path texts are valid UTF-16")
+                            .as_bytes(),
+                    ),
+                },
                 REPLACE_WITH_CLOSE_PAREN => {
                     out.push(b')');
                     range_start += 1;
@@ -222,7 +232,10 @@ impl BlankString {
         let mut extra = 0usize;
         for &(flags, start, end, text_index) in &self.ranges {
             if flags == REPLACE_WITH_TEXT {
-                let len = self.texts[text_index as usize].len();
+                let len = match &self.texts[text_index as usize] {
+                    SpliceText::Str(text) => text.chars().map(char::len_utf16).sum(),
+                    SpliceText::Units(units) => units.len(),
+                };
                 let u0 = unit_at(start);
                 let u1 = unit_at(end);
                 extra += len.saturating_sub(u1 - u0);
@@ -240,7 +253,10 @@ impl BlankString {
 
             let mut range_unit = range_unit;
             match flags {
-                REPLACE_WITH_TEXT => out.extend_from_slice(&self.texts[text_index as usize]),
+                REPLACE_WITH_TEXT => match &self.texts[text_index as usize] {
+                    SpliceText::Str(text) => out.extend(text.encode_utf16()),
+                    SpliceText::Units(units) => out.extend_from_slice(units),
+                },
                 REPLACE_WITH_CLOSE_PAREN => {
                     out.push(0x29);
                     range_unit += 1;
