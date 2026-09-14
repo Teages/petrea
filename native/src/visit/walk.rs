@@ -323,8 +323,38 @@ pub struct Walker<'a> {
     /// Memoized (scope, name) → binding resolutions; bindings freeze after
     /// the prepare pass, so entries stay valid for the whole walk. A plain
     /// map (no interior mutability) keeps `Walker` covariant over `'a`.
-    pub(crate) binding_cache: std::collections::HashMap<(u32, &'a str), crate::visit::define::NameBinding>,
+    /// FNV-hashed: SipHash costs more than the few scope hops a memo hit
+    /// saves, which is the same reason [`crate::visit::define`] keeps
+    /// shallow chains out of the memo entirely.
+    pub(crate) binding_cache: std::collections::HashMap<(u32, &'a str), crate::visit::define::NameBinding, FnvBuild>,
 }
+
+/// FNV-1a over the tiny `(u32, &str)` binding keys — no SipHash rounds, no
+/// randomness needed (the keys are internal ids, not user-controlled).
+pub(crate) struct FnvHasher(u64);
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+impl Default for FnvHasher {
+    fn default() -> Self {
+        FnvHasher(FNV_OFFSET)
+    }
+}
+
+impl std::hash::Hasher for FnvHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= *byte as u64;
+            self.0 = self.0.wrapping_mul(FNV_PRIME);
+        }
+    }
+}
+
+pub(crate) type FnvBuild = std::hash::BuildHasherDefault<FnvHasher>;
 
 /// Two tiers: parents are cheap and every enum-declaring file gets them; the
 /// scope serials and the whole-file binding registry exist only for binding
@@ -402,7 +432,7 @@ pub fn blank_program<'a>(
         node_scope: Vec::new(),
         defines,
         has_with: false,
-        binding_cache: std::collections::HashMap::new(),
+        binding_cache: std::collections::HashMap::default(),
     };
 
     // directives are prepended to the statement list (statement-like, not a function body)
@@ -463,7 +493,7 @@ pub fn blank_program_utf16<'a>(
         node_scope: Vec::new(),
         defines,
         has_with: false,
-        binding_cache: std::collections::HashMap::new(),
+        binding_cache: std::collections::HashMap::default(),
     };
 
     let mut indices = Vec::with_capacity(program.directives.len() + program.body.len());

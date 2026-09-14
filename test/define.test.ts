@@ -1019,6 +1019,30 @@ describe('define', () => {
       expect(transpile('eval("1+1")', { define: { eval: 'eval' } })).toContain('eval("1+1")')
     })
 
+    it('keeps this and import.meta eval splices indirect (audit round 16)', () => {
+      // a `this(...)` / `import.meta(...)` call could never have been the
+      // identifier `eval`, so the splice must not create a direct eval
+      const thisEval = transpile(
+        'const secret = 123\nconst read = () => this("typeof secret")\nglobalThis.result = read()',
+        { define: { this: 'eval' } },
+      )
+      expect(thisEval).toContain('(0, eval)')
+      new Function(thisEval)()
+      // indirect eval evaluates in global scope: `secret` is invisible there
+      expect(globalThis.result).toBe('undefined')
+
+      const metaEval = transpile(
+        'const secret = 123\nconst read = () => import.meta("typeof secret")\nglobalThis.result = read()',
+        { define: { 'import.meta': 'eval' } },
+      )
+      expect(metaEval).toContain('(0, eval)')
+      new Function(metaEval)()
+      expect(globalThis.result).toBe('undefined')
+
+      // away from a callee the value splices bare, like esbuild
+      expect(transpile('this.x', { define: { this: 'eval' } })).toContain('eval.x')
+    })
+
     it('accepts null-rooted chains like esbuild (audit round 15)', () => {
       expect(transpile('log(x)', { define: { x: 'null.x' } })).toContain('log(null.x)')
     })

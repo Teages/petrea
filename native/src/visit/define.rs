@@ -196,6 +196,9 @@ impl<'a> Walker<'a> {
             return;
         }
         let spliced = self.splice_text(idx, value, span);
+        // `this(...)` could never have been the identifier `eval`, so a bare
+        // global `eval` value must splice as an indirect call
+        let spliced = self.indirect_if_bare_eval(idx, value, spliced);
         let (text, target) = self.detached(idx, span, value, spliced);
         let text = self.wrap_directive(idx, value, text);
         self.blanker
@@ -211,6 +214,9 @@ impl<'a> Walker<'a> {
             return;
         }
         let spliced = self.splice_text(idx, value, span);
+        // as with `this(...)`: `import.meta(...)` was never the identifier
+        // `eval`, so a bare global `eval` value stays an indirect call
+        let spliced = self.indirect_if_bare_eval(idx, value, spliced);
         let (text, target) = self.detached(idx, span, value, spliced);
         let text = self.wrap_directive(idx, value, text);
         self.blanker
@@ -312,16 +318,7 @@ impl<'a> Walker<'a> {
         // indirect by construction, and splicing `eval(...)` bare would make
         // it direct — evaluating in the enclosing scope instead of global
         let mut text = self.splice_text(idx, value, span);
-        if matches!(&value.root, Some(ChainRoot::Ident(root)) if root == "eval")
-            && !value.dotted
-            && matches!(self.name_binding(idx, "eval"), NameBinding::Global)
-        {
-            let (top, _) = self.unwrap_up(idx);
-            let parent = self.parent_of(top);
-            if parent != u32::MAX && self.is_call_or_tag_callee(top, parent) {
-                text = format!("(0, {text})");
-            }
-        }
+        text = self.indirect_if_bare_eval(idx, value, text);
         let text = self.wrap_directive(idx, value, text);
         self.blanker.output.override_range_sorted(span.start, span.end, text);
         true
@@ -365,6 +362,33 @@ impl<'a> Walker<'a> {
             AstKind::CallExpression(call) if call.callee.span().start == start)
             || matches!(self.node_kind(parent),
                 AstKind::TaggedTemplateExpression(tag) if tag.tag.span().start == start)
+    }
+
+    /// A callee that could never have been the identifier `eval` — a member
+    /// chain, `this` or `import.meta` — must not *become* one when its splice
+    /// is a bare global `eval` value: spliced bare the call would turn into a
+    /// direct eval reading the enclosing scope. Identifiers keep their own
+    /// spelling (an `eval`-valued identifier key stays a direct eval, as
+    /// esbuild splices it), and a shadowed local `eval` value reads that
+    /// binding — no hazard either way.
+    fn indirect_if_bare_eval(
+        &mut self,
+        idx: u32,
+        value: &DefineValue,
+        text: String,
+    ) -> String {
+        if !matches!(&value.root, Some(ChainRoot::Ident(root)) if root == "eval")
+            || value.dotted
+            || !matches!(self.name_binding(idx, "eval"), NameBinding::Global)
+        {
+            return text;
+        }
+        let (top, _) = self.unwrap_up(idx);
+        let parent = self.parent_of(top);
+        if parent != u32::MAX && self.is_call_or_tag_callee(top, parent) {
+            return format!("(0, {text})");
+        }
+        text
     }
 
     /// The effective expression context of a reference after erasure: skips
@@ -732,17 +756,45 @@ impl<'a> Walker<'a> {
         self.scope_binding(self.node_scope(idx), name)
     }
 
+    /// How many scopes a resolution walks inline before the memo takes
+    /// over. Shallow chains dominate real code, and for them the memo is a
+    /// net loss: dense-hit files query many distinct (scope, name) pairs
+    /// exactly once, paying a hash insert per query they never re-ask —
+    /// while a two-to-three hop walk is cheaper than that hash round trip.
+    const SHALLOW_HOPS: usize = 3;
+
     fn scope_binding(&mut self, scope: u32, name: &'a str) -> NameBinding {
+        let mut scope = scope;
+        for _ in 0..Self::SHALLOW_HOPS {
+            match self.binding_in_scope(scope, name) {
+                Some(binding) => return binding,
+                None if scope == 0 => return NameBinding::Global,
+                None => scope = scope_above(self, scope),
+            }
+        }
+        // deep enough that repeat queries are plausible — memoize every
+        // level from here up
+        self.memoized_scope_binding(scope, name)
+    }
+
+    fn memoized_scope_binding(&mut self, scope: u32, name: &'a str) -> NameBinding {
         let key = (scope, name);
         if let Some(cached) = self.binding_cache.get(&key) {
             return cached.clone();
         }
-        let resolved = self.resolve_scope_binding(scope, name);
+        let resolved = match self.binding_in_scope(scope, name) {
+            Some(binding) => binding,
+            None if scope == 0 => NameBinding::Global,
+            // the parent resolution goes through the memo, so a chain walks
+            // each scope once per name across the whole file
+            None => self.memoized_scope_binding(scope_above(self, scope), name),
+        };
         self.binding_cache.insert(key, resolved.clone());
         resolved
     }
 
-    fn resolve_scope_binding(&mut self, scope: u32, name: &'a str) -> NameBinding {
+    /// What `name` binds to at `scope` itself, if anything.
+    fn binding_in_scope(&self, scope: u32, name: &str) -> Option<NameBinding> {
         // most define-active files declare no enums: skip the member lookup
         // (and its UTF-16 allocation) entirely
         let enum_scopes = (!self.enum_members.is_empty())
@@ -755,18 +807,13 @@ impl<'a> Walker<'a> {
                     .get(group)
                     .is_some_and(|members| members.names.contains(&units))
             {
-                return NameBinding::EnumMember(group.1.clone());
+                return Some(NameBinding::EnumMember(group.1.clone()));
             }
         }
-        if self.const_bindings.binding_at(scope, name).is_some() {
-            return NameBinding::Local;
-        }
-        if scope == 0 {
-            return NameBinding::Global;
-        }
-        // the parent resolution goes through the memo, so a chain walks
-        // each scope once per name across the whole file
-        self.scope_binding(scope_above(self, scope), name)
+        self.const_bindings
+            .binding_at(scope, name)
+            .is_some()
+            .then_some(NameBinding::Local)
     }
 }
 
