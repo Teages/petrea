@@ -28,7 +28,7 @@ pub enum VisitResult {
 /// per-node `Vec` this replaced dominated the pass). Scope bookkeeping is
 /// deliberately deferred to [`derive_node_scopes`], and only for enum files.
 #[derive(Default)]
-struct Flattener<'a> {
+struct Flattener<'a, const GATED: bool> {
     nodes: Vec<AstKind<'a>>,
     first_child: Vec<u32>,
     next_sibling: Vec<u32>,
@@ -37,16 +37,118 @@ struct Flattener<'a> {
     /// Flat indices of the enum declarations — the scope model and collection
     /// pre-pass exist only for these; recording them spares a full rescan.
     enum_indices: Vec<u32>,
+    /// Each node's parent (the stack top at push time), recorded only when
+    /// defines are active: identical by construction to `derive_parents`
+    /// over the linked lists, without a second whole-file pass.
+    parent: Vec<u32>,
+    /// Gate facts collected at push time — `with` and JSX presence, and the
+    /// relevant names actually bound. `None`-gated, so define-free files
+    /// pay one branch per node.
+    gates: DefineGates<'a>,
+    gate_relevant: Option<Vec<&'a str>>,
+    gate_firsts: [u64; 4],
 }
 
-impl<'a> Visit<'a> for Flattener<'a> {
+/// What one flattening pass produced: the node arrays plus the define-gated
+/// extras (parents and gate facts, empty when the pass ran ungated).
+struct FlatParts<'a> {
+    nodes: Vec<AstKind<'a>>,
+    first_child: Vec<u32>,
+    next_sibling: Vec<u32>,
+    enum_indices: Vec<u32>,
+    parent: Vec<u32>,
+    gates: DefineGates<'a>,
+    relevant: Vec<&'a str>,
+}
+
+/// Flatten `program` once, folding the define gates into the pass when
+/// defines are active: the relevant-name set and its first-byte bitmap are
+/// known up front, so parents, `with`/JSX presence and relevant-name
+/// bindings are recorded at node push. The const-generic gate compiles the
+/// recording out entirely for define-free files — their walk is unchanged,
+/// not merely branch-guarded.
+fn flatten_program<'a>(program: &'a Program<'a>, defines: Option<&'a crate::defines::Defines>) -> FlatParts<'a> {
+    let defines_active = defines.is_some_and(|d| !d.is_empty());
+    if defines_active {
+        let relevant_roots = defines.unwrap().relevant_roots();
+        let mut gate_firsts = [0u64; 4];
+        for root in &relevant_roots {
+            if let Some(&byte) = root.as_bytes().first() {
+                gate_firsts[(byte as usize) >> 6] |= 1u64 << (byte & 63);
+            }
+        }
+        let mut flattener = Flattener::<true> {
+            gates: DefineGates::default(),
+            gate_relevant: Some(relevant_roots),
+            gate_firsts,
+            nodes: Vec::new(),
+            first_child: Vec::new(),
+            next_sibling: Vec::new(),
+            last_child: Vec::new(),
+            stack: Vec::new(),
+            enum_indices: Vec::new(),
+            parent: Vec::new(),
+        };
+        flattener.visit_program(program);
+        let Flattener::<true> {
+            nodes,
+            first_child,
+            next_sibling,
+            enum_indices,
+            parent,
+            gates,
+            gate_relevant,
+            ..
+        } = flattener;
+        FlatParts {
+            nodes,
+            first_child,
+            next_sibling,
+            enum_indices,
+            parent,
+            gates,
+            relevant: gate_relevant.unwrap_or_default(),
+        }
+    }
+    else {
+        let mut flattener = Flattener::<false>::default();
+        flattener.visit_program(program);
+        let Flattener::<false> {
+            nodes,
+            first_child,
+            next_sibling,
+            enum_indices,
+            ..
+        } = flattener;
+        FlatParts {
+            nodes,
+            first_child,
+            next_sibling,
+            enum_indices,
+            parent: Vec::new(),
+            gates: DefineGates::default(),
+            relevant: Vec::new(),
+        }
+    }
+}
+
+/// Whether `name`'s first byte is marked present in `firsts`.
+fn starts_relevant(name: &str, firsts: &[u64; 4]) -> bool {
+    match name.as_bytes().first() {
+        Some(&byte) => firsts[(byte as usize) >> 6] & (1u64 << (byte & 63)) != 0,
+        None => false,
+    }
+}
+
+impl<'a, const GATED: bool> Visit<'a> for Flattener<'a, GATED> {
     fn enter_node(&mut self, kind: AstKind<'a>) {
         let index = self.nodes.len() as u32;
         kind.set_node_id(NodeId::new(index as usize));
         if matches!(kind, AstKind::TSEnumDeclaration(_)) {
             self.enum_indices.push(index);
         }
-        if let Some(&parent) = self.stack.last() {
+        let parent = self.stack.last().copied();
+        if let Some(parent) = parent {
             let last = self.last_child[parent as usize];
             if last == u32::MAX {
                 self.first_child[parent as usize] = index;
@@ -54,6 +156,31 @@ impl<'a> Visit<'a> for Flattener<'a> {
                 self.next_sibling[last as usize] = index;
             }
             self.last_child[parent as usize] = index;
+        }
+        if GATED {
+            self.parent.push(parent.unwrap_or(u32::MAX));
+            // the define gates, folded into this pass: `with` and JSX
+            // presence, and relevant-name bindings behind the first-byte
+            // bitmap (a binding starting with a byte no relevant root starts
+            // with cannot match, so the string compares stay rare)
+            match kind {
+                AstKind::WithStatement(_) => self.gates.has_with = true,
+                // any JSX syntax implies an element or fragment around it,
+                // so the two kinds together detect "file has JSX"
+                AstKind::JSXElement(_) | AstKind::JSXFragment(_) => self.gates.has_jsx = true,
+                AstKind::BindingIdentifier(binding) => {
+                    let name = binding.name.as_str();
+                    let relevant = starts_relevant(name, &self.gate_firsts)
+                        && self
+                            .gate_relevant
+                            .as_ref()
+                            .is_some_and(|roots| roots.iter().any(|root| *root == name));
+                    if relevant && !self.gates.bound.contains(&name) {
+                        self.gates.bound.push(name);
+                    }
+                }
+                _ => {}
+            }
         }
         self.stack.push(index);
         self.nodes.push(kind);
@@ -270,6 +397,65 @@ pub(crate) fn is_enum_scope_container(kind: AstKind<'_>) -> bool {
 /// its own serial, so const resolution walks real parent scopes instead of
 /// approximating them. A switch's cases share one scope too — opened at the
 /// first case, after the discriminant evaluated in the enclosing scope.
+/// The define-forced scope model in one pass: per-node scope serials (the
+/// same rules as [`derive_node_scopes`]) with the filtered registration
+/// fused in at each node. Function names defer to their `FormalParameters`
+/// child — the first child in preorder, and the scope they bind in — so
+/// every scope a registration reads is already written; nothing else
+/// registers between a function and its parameter list.
+fn derive_scopes_and_register<'a>(
+    walker: &mut Walker<'a>,
+    filter: &[&str],
+) -> enums::model::ConstBindings<'a> {
+    walker.node_scope = vec![0u32; walker.nodes.len()];
+    let mut bindings = enums::model::ConstBindings {
+        bindings: HashMap::new(),
+        enum_scopes: HashMap::new(),
+    };
+    for idx in 1..walker.nodes.len() as u32 {
+        let kind = walker.nodes[idx as usize];
+        walker.node_scope[idx as usize] =
+            if is_enum_scope_container(kind) || introduces_lexical_scope(kind) {
+                idx
+            } else if matches!(kind, AstKind::SwitchCase(_)) {
+                walker.parent[idx as usize]
+            } else if matches!(
+                walker.nodes[walker.parent[idx as usize] as usize],
+                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+            ) {
+                let function = walker.parent[idx as usize];
+                let mut child = walker.first_child[function as usize];
+                let mut scope = walker.node_scope[function as usize];
+                while child != u32::MAX {
+                    if matches!(walker.nodes[child as usize], AstKind::FormalParameters(_)) {
+                        scope = walker.node_scope[child as usize];
+                        break;
+                    }
+                    child = walker.next_sibling[child as usize];
+                }
+                scope
+            } else {
+                walker.node_scope[walker.parent[idx as usize] as usize]
+            };
+        if !matches!(kind, AstKind::Function(_)) {
+            enums::register::register_other_node(walker, idx, &mut bindings, Some(filter));
+        }
+        if matches!(kind, AstKind::FormalParameters(_)) {
+            let function = walker.parent[idx as usize];
+            if let AstKind::Function(node) = walker.nodes[function as usize] {
+                enums::register::register_function_name(
+                    walker,
+                    function,
+                    node,
+                    &mut bindings,
+                    Some(filter),
+                );
+            }
+        }
+    }
+    bindings
+}
+
 pub(crate) fn introduces_lexical_scope(kind: AstKind<'_>) -> bool {
     matches!(
         kind,
@@ -377,19 +563,30 @@ fn prepare_enum_tables(
     defines_need_model: bool,
     define_name_filter: Option<&[&str]>,
 ) {
-    walker.parent = derive_parents(&walker.first_child, &walker.next_sibling);
+    // the flattener records parents inline on define-active files; only the
+    // enum-only path still derives them from the linked lists
+    if walker.parent.is_empty() {
+        walker.parent = derive_parents(&walker.first_child, &walker.next_sibling);
+    }
     let mut collected = enums::collect::collect_enum_declarations(walker, enum_indices, None);
+    let mut bindings = None;
     if collected.needs_scope_model || defines_need_model {
-        walker.node_scope = derive_node_scopes(
-            &walker.nodes,
-            &walker.parent,
-            &walker.first_child,
-            &walker.next_sibling,
-        );
-        collected = enums::collect::collect_enum_declarations(walker, enum_indices, define_name_filter);
+        if let Some(filter) = define_name_filter {
+            // the define-forced registry: scope serials and the filtered
+            // registration fused into one pass over the file
+            bindings = Some(derive_scopes_and_register(walker, filter));
+        } else {
+            walker.node_scope = derive_node_scopes(
+                &walker.nodes,
+                &walker.parent,
+                &walker.first_child,
+                &walker.next_sibling,
+            );
+            collected = enums::collect::collect_enum_declarations(walker, enum_indices, None);
+        }
     }
     walker.enum_members = Rc::new(collected.table);
-    walker.const_bindings = Rc::new(collected.bindings);
+    walker.const_bindings = Rc::new(bindings.unwrap_or(collected.bindings));
     walker.enum_folds = collected.folds;
 }
 
@@ -475,18 +672,23 @@ pub fn blank_program<'a>(
     tokens: &'a [Token],
     defines: Option<&crate::defines::Defines>,
 ) -> (BlankString, Vec<UnsupportedSyntax>, Vec<Warning>) {
-    let mut flattener = Flattener::default();
-    flattener.visit_program(program);
-    let enum_indices = flattener.enum_indices;
+    // the define gates fold into the flattening pass: the relevant set and
+    // its first-byte bitmap are known up front, so parents, `with`/JSX
+    // presence and relevant-name bindings are recorded at node push
+    let defines_active = defines.is_some_and(|d| !d.is_empty());
+    let flat = flatten_program(program, defines);
+    let enum_indices = flat.enum_indices;
+    let gates = flat.gates;
+    let relevant = flat.relevant;
 
     let mut walker = Walker {
         src,
         blanker: Blanker::new(src, tokens),
         units: None,
         byte_to_unit: None,
-        nodes: flattener.nodes,
-        first_child: flattener.first_child,
-        next_sibling: flattener.next_sibling,
+        nodes: flat.nodes,
+        first_child: flat.first_child,
+        next_sibling: flat.next_sibling,
         scratch_pool: Vec::new(),
         parent_statement: None,
         enum_members: Rc::new(HashMap::new()),
@@ -495,12 +697,12 @@ pub fn blank_program<'a>(
             enum_scopes: HashMap::new(),
         }),
         enum_folds: HashMap::new(),
-        parent: Vec::new(),
         node_scope: Vec::new(),
         defines,
-        has_with: false,
-        has_jsx: false,
-        bound_relevant: None,
+        parent: flat.parent,
+        has_with: gates.has_with,
+        has_jsx: gates.has_jsx,
+        bound_relevant: (defines_active && enum_indices.is_empty()).then_some(gates.bound),
         binding_cache: std::collections::HashMap::default(),
     };
 
@@ -512,40 +714,18 @@ pub fn blank_program<'a>(
     for stmt in &program.body {
         indices.push(statement_index(stmt));
     }
-    if !enum_indices.is_empty() || defines.is_some_and(|d| !d.is_empty()) {
-        // gates first: `with` presence and a define-relevant binding decide
-        // whether defines force the scope model. Enum-declaring files keep it
-        // regardless (entity values may need enum-member qualification), and
-        // so does any file binding a relevant name — the precise shadow walk
-        // then runs exactly where it can change an outcome.
-        let mut define_name_filter: Option<Vec<&str>> = None;
-        let mut bound_relevant: Option<Vec<&str>> = None;
-        let defines_need_model = match defines {
-            Some(defines) if !defines.is_empty() => {
-                let relevant = defines.relevant_roots();
-                let gates = scan_define_gates(&walker.nodes, &relevant);
-                walker.has_with = gates.has_with;
-                walker.has_jsx = gates.has_jsx;
-                // per-name bindings are sound only without enum member scopes
-                if enum_indices.is_empty() {
-                    bound_relevant = Some(gates.bound);
-                }
-                // a bound relevant name needs the precise shadow walk; enums
-                // matter only for entity values, whose splices qualify
-                // through enum member scopes — literal-only defines never
-                // resolve a name and skip the model on enum files too
-                let need = bound_relevant.as_ref().is_some_and(|bound| !bound.is_empty())
-                    || (!enum_indices.is_empty() && defines.has_entity_values());
-                // the registry then serves define resolutions only — names
-                // outside the relevant set never join it
-                if need && enum_indices.is_empty() {
-                    define_name_filter = Some(relevant);
-                }
-                need
-            }
-            _ => false,
-        };
-        walker.bound_relevant = bound_relevant;
+    if !enum_indices.is_empty() || defines_active {
+        // a bound relevant name needs the precise shadow walk; enums matter
+        // only for entity values, whose splices qualify through enum member
+        // scopes — literal-only defines never resolve a name and skip the
+        // model on enum files too. The registry then serves define
+        // resolutions only: names outside the relevant set never join it.
+        let defines_need_model = walker
+            .bound_relevant
+            .as_ref()
+            .is_some_and(|bound| !bound.is_empty())
+            || (!enum_indices.is_empty() && defines.is_some_and(|d| d.has_entity_values()));
+        let define_name_filter = (defines_need_model && enum_indices.is_empty()).then_some(relevant);
         prepare_enum_tables(
             &mut walker,
             &enum_indices,
@@ -570,18 +750,23 @@ pub fn blank_program_utf16<'a>(
     tokens: &'a [Token],
     defines: Option<&crate::defines::Defines>,
 ) -> (BlankString, Vec<UnsupportedSyntax>, Vec<Warning>) {
-    let mut flattener = Flattener::default();
-    flattener.visit_program(program);
-    let enum_indices = flattener.enum_indices;
+    // the define gates fold into the flattening pass: the relevant set and
+    // its first-byte bitmap are known up front, so parents, `with`/JSX
+    // presence and relevant-name bindings are recorded at node push
+    let defines_active = defines.is_some_and(|d| !d.is_empty());
+    let flat = flatten_program(program, defines);
+    let enum_indices = flat.enum_indices;
+    let gates = flat.gates;
+    let relevant = flat.relevant;
 
     let mut walker = Walker {
         src: parse_copy,
         blanker: Blanker::new(parse_copy, tokens),
         units: Some(units),
         byte_to_unit: Some(byte_to_unit),
-        nodes: flattener.nodes,
-        first_child: flattener.first_child,
-        next_sibling: flattener.next_sibling,
+        nodes: flat.nodes,
+        first_child: flat.first_child,
+        next_sibling: flat.next_sibling,
         scratch_pool: Vec::new(),
         parent_statement: None,
         enum_members: Rc::new(HashMap::new()),
@@ -590,12 +775,12 @@ pub fn blank_program_utf16<'a>(
             enum_scopes: HashMap::new(),
         }),
         enum_folds: HashMap::new(),
-        parent: Vec::new(),
         node_scope: Vec::new(),
         defines,
-        has_with: false,
-        has_jsx: false,
-        bound_relevant: None,
+        parent: flat.parent,
+        has_with: gates.has_with,
+        has_jsx: gates.has_jsx,
+        bound_relevant: (defines_active && enum_indices.is_empty()).then_some(gates.bound),
         binding_cache: std::collections::HashMap::default(),
     };
 
@@ -606,40 +791,18 @@ pub fn blank_program_utf16<'a>(
     for stmt in &program.body {
         indices.push(statement_index(stmt));
     }
-    if !enum_indices.is_empty() || defines.is_some_and(|d| !d.is_empty()) {
-        // gates first: `with` presence and a define-relevant binding decide
-        // whether defines force the scope model. Enum-declaring files keep it
-        // regardless (entity values may need enum-member qualification), and
-        // so does any file binding a relevant name — the precise shadow walk
-        // then runs exactly where it can change an outcome.
-        let mut define_name_filter: Option<Vec<&str>> = None;
-        let mut bound_relevant: Option<Vec<&str>> = None;
-        let defines_need_model = match defines {
-            Some(defines) if !defines.is_empty() => {
-                let relevant = defines.relevant_roots();
-                let gates = scan_define_gates(&walker.nodes, &relevant);
-                walker.has_with = gates.has_with;
-                walker.has_jsx = gates.has_jsx;
-                // per-name bindings are sound only without enum member scopes
-                if enum_indices.is_empty() {
-                    bound_relevant = Some(gates.bound);
-                }
-                // a bound relevant name needs the precise shadow walk; enums
-                // matter only for entity values, whose splices qualify
-                // through enum member scopes — literal-only defines never
-                // resolve a name and skip the model on enum files too
-                let need = bound_relevant.as_ref().is_some_and(|bound| !bound.is_empty())
-                    || (!enum_indices.is_empty() && defines.has_entity_values());
-                // the registry then serves define resolutions only — names
-                // outside the relevant set never join it
-                if need && enum_indices.is_empty() {
-                    define_name_filter = Some(relevant);
-                }
-                need
-            }
-            _ => false,
-        };
-        walker.bound_relevant = bound_relevant;
+    if !enum_indices.is_empty() || defines_active {
+        // a bound relevant name needs the precise shadow walk; enums matter
+        // only for entity values, whose splices qualify through enum member
+        // scopes — literal-only defines never resolve a name and skip the
+        // model on enum files too. The registry then serves define
+        // resolutions only: names outside the relevant set never join it.
+        let defines_need_model = walker
+            .bound_relevant
+            .as_ref()
+            .is_some_and(|bound| !bound.is_empty())
+            || (!enum_indices.is_empty() && defines.is_some_and(|d| d.has_entity_values()));
+        let define_name_filter = (defines_need_model && enum_indices.is_empty()).then_some(relevant);
         prepare_enum_tables(
             &mut walker,
             &enum_indices,

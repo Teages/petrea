@@ -77,7 +77,7 @@ pub(super) fn register_enum_declaration<'a>(
 
 /// Register one flattened node's non-enum bindings (enums go through
 /// [`register_enum_declaration`]).
-pub(super) fn register_other_node<'a>(
+pub(crate) fn register_other_node<'a>(
     w: &Walker<'a>,
     idx: u32,
     bindings: &mut ConstBindings<'a>,
@@ -132,7 +132,7 @@ fn bind_shadow<'a>(
 /// A declaration binds its name in the enclosing block; a named *expression*
 /// binds it in its parameter scope, which its body, defaults and nested
 /// scopes all nest inside.
-fn register_function_name<'a>(
+pub(crate) fn register_function_name<'a>(
     w: &Walker<'a>,
     idx: u32,
     node: &'a Function<'a>,
