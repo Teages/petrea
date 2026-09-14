@@ -96,6 +96,51 @@ pub(crate) fn derive_parents(first_child: &[u32], next_sibling: &[u32]) -> Vec<u
 /// node's own index *is* its scope identity — no serial table; scope chains
 /// walk the introducing nodes' parents (see `enums::model::scope_chain_of`).
 /// The array is preorder, so a parent's entry is written before children read it.
+/// The scope serial one node gets, reading only preorder-earlier entries:
+/// its own index when it introduces a scope, its switch for a case clause,
+/// the parameter environment for a function's other direct children, and
+/// otherwise the parent's. The shared rule of both derivations — the plain
+/// array pass and the fused registration pass must never disagree.
+fn scope_within(
+    nodes: &[AstKind<'_>],
+    parent: &[u32],
+    first_child: &[u32],
+    next_sibling: &[u32],
+    node_scope: &[u32],
+    idx: u32,
+) -> u32 {
+    let kind = nodes[idx as usize];
+    if is_enum_scope_container(kind) || introduces_lexical_scope(kind) {
+        idx
+    } else if matches!(kind, AstKind::SwitchCase(_)) {
+        // the cases' shared scope, keyed on the switch: a case opens it, the
+        // discriminant (a sibling subtree) stays in the enclosing scope
+        parent[idx as usize]
+    } else if matches!(
+        nodes[parent[idx as usize] as usize],
+        AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
+    ) {
+        // everything directly inside a function that is not its parameters
+        // or (braced) body — an expression-bodied arrow's body, type
+        // positions — evaluates in the parameter environment, a *sibling*
+        // subtree parent propagation cannot see (FormalParameters precedes
+        // the body in preorder, so its entry is already filled here)
+        let function = parent[idx as usize];
+        let mut child = first_child[function as usize];
+        let mut scope = node_scope[function as usize];
+        while child != u32::MAX {
+            if matches!(nodes[child as usize], AstKind::FormalParameters(_)) {
+                scope = node_scope[child as usize];
+                break;
+            }
+            child = next_sibling[child as usize];
+        }
+        scope
+    } else {
+        node_scope[parent[idx as usize] as usize]
+    }
+}
+
 pub(crate) fn derive_node_scopes(
     nodes: &[AstKind<'_>],
     parent: &[u32],
@@ -104,37 +149,8 @@ pub(crate) fn derive_node_scopes(
 ) -> Vec<u32> {
     let mut node_scope = vec![0u32; nodes.len()];
     for idx in 1..nodes.len() as u32 {
-        let kind = nodes[idx as usize];
-        node_scope[idx as usize] =
-            if is_enum_scope_container(kind) || introduces_lexical_scope(kind) {
-                idx
-            } else if matches!(kind, AstKind::SwitchCase(_)) {
-                // the cases' shared scope, keyed on the switch: a case opens it,
-                // the discriminant (a sibling subtree) stays in the enclosing scope
-                parent[idx as usize]
-            } else if matches!(
-                nodes[parent[idx as usize] as usize],
-                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
-            ) {
-                // everything directly inside a function that is not its parameters
-                // or (braced) body — an expression-bodied arrow's body, type
-                // positions — evaluates in the parameter environment, a *sibling*
-                // subtree parent propagation cannot see (FormalParameters precedes
-                // the body in preorder, so its entry is already filled here)
-                let function = parent[idx as usize];
-                let mut child = first_child[function as usize];
-                let mut scope = node_scope[function as usize];
-                while child != u32::MAX {
-                    if matches!(nodes[child as usize], AstKind::FormalParameters(_)) {
-                        scope = node_scope[child as usize];
-                        break;
-                    }
-                    child = next_sibling[child as usize];
-                }
-                scope
-            } else {
-                node_scope[parent[idx as usize] as usize]
-            };
+        let scope = scope_within(nodes, parent, first_child, next_sibling, &node_scope, idx);
+        node_scope[idx as usize] = scope;
     }
     node_scope
 }
@@ -175,29 +191,15 @@ fn derive_scopes_and_register<'a>(
     };
     for idx in 1..walker.nodes.len() as u32 {
         let kind = walker.nodes[idx as usize];
-        walker.node_scope[idx as usize] =
-            if is_enum_scope_container(kind) || introduces_lexical_scope(kind) {
-                idx
-            } else if matches!(kind, AstKind::SwitchCase(_)) {
-                walker.parent[idx as usize]
-            } else if matches!(
-                walker.nodes[walker.parent[idx as usize] as usize],
-                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
-            ) {
-                let function = walker.parent[idx as usize];
-                let mut child = walker.first_child[function as usize];
-                let mut scope = walker.node_scope[function as usize];
-                while child != u32::MAX {
-                    if matches!(walker.nodes[child as usize], AstKind::FormalParameters(_)) {
-                        scope = walker.node_scope[child as usize];
-                        break;
-                    }
-                    child = walker.next_sibling[child as usize];
-                }
-                scope
-            } else {
-                walker.node_scope[walker.parent[idx as usize] as usize]
-            };
+        let scope = scope_within(
+            &walker.nodes,
+            &walker.parent,
+            &walker.first_child,
+            &walker.next_sibling,
+            &walker.node_scope,
+            idx,
+        );
+        walker.node_scope[idx as usize] = scope;
         if !matches!(kind, AstKind::Function(_)) {
             enums::register::register_other_node(walker, idx, &mut bindings, Some(filter));
         }
