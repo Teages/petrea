@@ -360,13 +360,14 @@ pub(crate) type FnvBuild = std::hash::BuildHasherDefault<FnvHasher>;
 /// scope serials and the whole-file binding registry exist only for binding
 /// resolution — self-contained enums (the common case) skip the heavy model,
 /// and [`enums::collect::collect_enum_declarations`] decides by requesting it.
-/// Active defines always need it: every reference must resolve against the
-/// registry to know whether it is unbound.
-fn prepare_enum_tables(walker: &mut Walker<'_>, enum_indices: &[u32]) {
+/// Active defines request it only when a [`scan_define_gates`] pass found a
+/// binding whose name a define decision depends on: otherwise every
+/// reference is provably unshadowed and the empty-model fast path in
+/// [`crate::visit::define`] answers every resolution as global.
+fn prepare_enum_tables(walker: &mut Walker<'_>, enum_indices: &[u32], defines_need_model: bool) {
     walker.parent = derive_parents(&walker.first_child, &walker.next_sibling);
-    let defines_active = walker.defines.is_some_and(|d| !d.is_empty());
     let mut collected = enums::collect::collect_enum_declarations(walker, enum_indices);
-    if collected.needs_scope_model || defines_active {
+    if collected.needs_scope_model || defines_need_model {
         walker.node_scope = derive_node_scopes(
             &walker.nodes,
             &walker.parent,
@@ -378,6 +379,28 @@ fn prepare_enum_tables(walker: &mut Walker<'_>, enum_indices: &[u32]) {
     walker.enum_members = Rc::new(collected.table);
     walker.const_bindings = Rc::new(collected.bindings);
     walker.enum_folds = collected.folds;
+}
+
+/// One linear pass over the flattened nodes collecting the define gates:
+/// whether any `with` statement exists (recovered parses included — lets
+/// `inside_with` skip its ancestor walk on the common file), and whether any
+/// binding carries a [`crate::defines::Defines::relevant_roots`] name. Both
+/// were separate whole-file costs before; one discriminant-test pass serves
+/// both, and the second decides whether defines force the scope model.
+fn scan_define_gates(nodes: &[AstKind<'_>], relevant: &[&str]) -> (bool, bool) {
+    let mut has_with = false;
+    let mut relevant_bound = false;
+    for kind in nodes {
+        match kind {
+            AstKind::WithStatement(_) => has_with = true,
+            AstKind::BindingIdentifier(binding) => {
+                let name = binding.name.as_str();
+                relevant_bound |= relevant.iter().any(|root| *root == name);
+            }
+            _ => {}
+        }
+    }
+    (has_with, relevant_bound)
 }
 
 /// Iterator over the linked-list children of a node, in visit order.
@@ -444,13 +467,21 @@ pub fn blank_program<'a>(
         indices.push(statement_index(stmt));
     }
     if !enum_indices.is_empty() || defines.is_some_and(|d| !d.is_empty()) {
-        prepare_enum_tables(&mut walker, &enum_indices);
-        if defines.is_some() {
-            walker.has_with = walker
-                .nodes
-                .iter()
-                .any(|kind| matches!(kind, AstKind::WithStatement(_)));
-        }
+        // gates first: `with` presence and a define-relevant binding decide
+        // whether defines force the scope model. Enum-declaring files keep it
+        // regardless (entity values may need enum-member qualification), and
+        // so does any file binding a relevant name — the precise shadow walk
+        // then runs exactly where it can change an outcome.
+        let defines_need_model = match defines {
+            Some(defines) if !defines.is_empty() => {
+                let (has_with, relevant_bound) =
+                    scan_define_gates(&walker.nodes, &defines.relevant_roots());
+                walker.has_with = has_with;
+                !enum_indices.is_empty() || relevant_bound
+            }
+            _ => false,
+        };
+        prepare_enum_tables(&mut walker, &enum_indices, defines_need_model);
     }
     walker.visit_node_array(&indices, true, false);
 
@@ -504,13 +535,21 @@ pub fn blank_program_utf16<'a>(
         indices.push(statement_index(stmt));
     }
     if !enum_indices.is_empty() || defines.is_some_and(|d| !d.is_empty()) {
-        prepare_enum_tables(&mut walker, &enum_indices);
-        if defines.is_some() {
-            walker.has_with = walker
-                .nodes
-                .iter()
-                .any(|kind| matches!(kind, AstKind::WithStatement(_)));
-        }
+        // gates first: `with` presence and a define-relevant binding decide
+        // whether defines force the scope model. Enum-declaring files keep it
+        // regardless (entity values may need enum-member qualification), and
+        // so does any file binding a relevant name — the precise shadow walk
+        // then runs exactly where it can change an outcome.
+        let defines_need_model = match defines {
+            Some(defines) if !defines.is_empty() => {
+                let (has_with, relevant_bound) =
+                    scan_define_gates(&walker.nodes, &defines.relevant_roots());
+                walker.has_with = has_with;
+                !enum_indices.is_empty() || relevant_bound
+            }
+            _ => false,
+        };
+        prepare_enum_tables(&mut walker, &enum_indices, defines_need_model);
     }
     walker.visit_node_array(&indices, true, false);
 

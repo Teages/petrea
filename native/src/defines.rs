@@ -101,6 +101,28 @@ impl Defines {
         self.import_meta_define.map(|i| &self.values[i as usize])
     }
 
+    /// Names whose binding status anywhere in a file can change a define
+    /// decision: the roots of identifier keys and dotted keys (a local
+    /// binding shadows substitution), plus entity value roots (a local
+    /// `eval` keeps a spliced eval value direct). When no binding carries
+    /// any of these names, substitution needs no scope model at all.
+    pub(crate) fn relevant_roots(&self) -> Vec<&str> {
+        let mut roots: Vec<&str> = self.identifiers.keys().map(String::as_str).collect();
+        for entries in self.dotted.values() {
+            for entry in entries {
+                if let ChainRoot::Ident(name) = &entry.root {
+                    roots.push(name.as_str());
+                }
+            }
+        }
+        for value in &self.values {
+            if let Some(ChainRoot::Ident(name)) = &value.root {
+                roots.push(name.as_str());
+            }
+        }
+        roots
+    }
+
     /// The longest multi-segment key ending in `tail`, if any — the chain
     /// builder stops after that many segments, and callers with no candidate
     /// for their outermost property skip chain building entirely.
