@@ -10,6 +10,20 @@ export interface UnsupportedSyntax {
 
 export type OnError = (node: UnsupportedSyntax) => void
 
+/**
+ * A recoverable condition at a source site: a define substitution was
+ * skipped because splicing there would change meaning (e.g. a literal or
+ * lowercase value in a JSX tag position). Positions are character offsets
+ * into the input.
+ */
+export interface Warning {
+  readonly type: string
+  readonly start: number
+  readonly end: number
+}
+
+export type OnWarn = (warning: Warning) => void
+
 export interface TranspileOptions {
   /**
    * Called for every unsupported construct (namespaces with runtime code,
@@ -18,6 +32,12 @@ export interface TranspileOptions {
    * mirroring ts-blank-space; enums are expanded instead of reported.
    */
   readonly onError?: OnError
+  /**
+   * Called for every recoverable condition, e.g. a define replacement
+   * skipped in a JSX tag position (`{ FLAG: 'component' }` would flip the
+   * component to an intrinsic string tag).
+   */
+  readonly onWarn?: OnWarn
   /** Parse the input as `ts` (default) or `tsx`. */
   readonly lang?: 'ts' | 'tsx'
   /**
@@ -27,4 +47,10 @@ export interface TranspileOptions {
    * name when this is omitted.
    */
   readonly filename?: string
+  /**
+   * Compile-time replacement of global references, esbuild-style:
+   * `{ __DEV__: 'true', 'process.env.NODE_ENV': '"production"' }`.
+   * Purely textual: shadowed references and writes are left untouched.
+   */
+  readonly define?: Readonly<Record<string, string>>
 }

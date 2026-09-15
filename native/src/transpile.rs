@@ -17,18 +17,21 @@ pub(crate) fn allocator_pool() -> &'static AllocatorPool {
     })
 }
 
-use crate::blank::blanker::UnsupportedSyntax;
+use crate::blank::blanker::{UnsupportedSyntax, Warning};
+use crate::defines::Defines;
 use crate::visit::walk::{blank_program, blank_program_utf16};
 
 pub struct TranspileOutput {
     pub code: String,
     pub unsupported: Vec<UnsupportedSyntax>,
+    pub warnings: Vec<Warning>,
 }
 
 /// UTF-16 path output: code units, with report offsets already UTF-16 code units.
 pub struct TranspileUnitsOutput {
     pub code: Vec<u16>,
     pub unsupported: Vec<UnsupportedSyntax>,
+    pub warnings: Vec<Warning>,
 }
 
 /// The API contract (`types.ts`) promises JS string indices (UTF-16 code
@@ -56,9 +59,19 @@ fn utf16_offset(input: &str, byte_offset: u32) -> u32 {
 /// Takes the input by value: the napi boundary already hands over an owned
 /// `String`, and the output side can reuse that buffer in place when the
 /// edits allow it (see `blank_string::BlankString::build_owned`).
-pub fn transpile(input: String, filename: &str) -> Result<TranspileOutput, String> {
+pub fn transpile(
+    input: String,
+    filename: &str,
+    defines: Option<&std::collections::HashMap<String, String>>,
+) -> Result<TranspileOutput, String> {
     let allocator_guard = allocator_pool().get();
     let allocator: &Allocator = &allocator_guard;
+    let defines = defines
+        .map(|entries| Defines::new(entries, allocator))
+        .transpose()
+        .map_err(|error| format!("invalid define: {error}"))?
+        // an empty map is no defines at all: no scope model, no substitution
+        .filter(|defines| !defines.is_empty());
     // unknown/no extension falls back to plain JavaScript (module, no JSX):
     // TypeScript syntax fails there instead of parsing as TS
     let source_type = SourceType::from_path(filename)
@@ -87,8 +100,8 @@ pub fn transpile(input: String, filename: &str) -> Result<TranspileOutput, Strin
         return Err(format!("failed to parse {filename}:\n{details}"));
     }
 
-    let (output, unsupported) =
-        blank_program(&return_value.program, input.as_str(), &return_value.tokens);
+    let (output, unsupported, warnings) =
+        blank_program(&return_value.program, input.as_str(), &return_value.tokens, defines.as_ref());
     // the input is still alive here but consumed by build_owned below, so the
     // report offsets (UTF-8 bytes) are converted to the promised UTF-16 units first
     let unsupported = unsupported
@@ -99,10 +112,19 @@ pub fn transpile(input: String, filename: &str) -> Result<TranspileOutput, Strin
             ..report
         })
         .collect();
+    let warnings = warnings
+        .into_iter()
+        .map(|warning| Warning {
+            start: utf16_offset(&input, warning.start),
+            end: utf16_offset(&input, warning.end),
+            ..warning
+        })
+        .collect();
 
     Ok(TranspileOutput {
         code: output.build_owned(input),
         unsupported,
+        warnings,
     })
 }
 
@@ -111,7 +133,11 @@ pub fn transpile(input: String, filename: &str) -> Result<TranspileOutput, Strin
 /// unit is taken from the original units, so raw lone surrogates survive.
 /// Report offsets are UTF-16 code units. Like [`transpile`], the units are
 /// taken by value so the output can reuse the buffer in place.
-pub fn transpile_units(units: Vec<u16>, filename: &str) -> Result<TranspileUnitsOutput, String> {
+pub fn transpile_units(
+    units: Vec<u16>,
+    filename: &str,
+    defines: Option<&std::collections::HashMap<String, String>>,
+) -> Result<TranspileUnitsOutput, String> {
     // Lossy parse copy: pairs become the astral character, every other unit
     // maps to itself when possible, U+FFFD otherwise; the byte length per
     // unit is tracked so spans can be mapped back.
@@ -153,6 +179,12 @@ pub fn transpile_units(units: Vec<u16>, filename: &str) -> Result<TranspileUnits
 
     let allocator_guard = allocator_pool().get();
     let allocator: &Allocator = &allocator_guard;
+    let defines = defines
+        .map(|entries| Defines::new(entries, allocator))
+        .transpose()
+        .map_err(|error| format!("invalid define: {error}"))?
+        // an empty map is no defines at all: no scope model, no substitution
+        .filter(|defines| !defines.is_empty());
     // same extension fallback as [`transpile`]
     let source_type = SourceType::from_path(filename)
         .unwrap_or_else(|_| SourceType::mjs())
@@ -178,12 +210,13 @@ pub fn transpile_units(units: Vec<u16>, filename: &str) -> Result<TranspileUnits
         return Err(format!("failed to parse {filename}:\n{details}"));
     }
 
-    let (output, unsupported) = blank_program_utf16(
+    let (output, unsupported, warnings) = blank_program_utf16(
         &return_value.program,
         &units,
         &parse_copy,
         &byte_to_unit,
         &return_value.tokens[..],
+        defines.as_ref(),
     );
 
     let unit_at = |pos: u32| byte_to_unit.partition_point(|&b| b < pos) as u32;
@@ -196,9 +229,19 @@ pub fn transpile_units(units: Vec<u16>, filename: &str) -> Result<TranspileUnits
         })
         .collect();
 
+    let warnings = warnings
+        .into_iter()
+        .map(|warning| Warning {
+            start: unit_at(warning.start),
+            end: unit_at(warning.end),
+            ..warning
+        })
+        .collect();
+
     Ok(TranspileUnitsOutput {
         code: output.build_units_owned(units, &byte_to_unit),
         unsupported,
+        warnings,
     })
 }
 
@@ -206,9 +249,10 @@ pub fn transpile_units(units: Vec<u16>, filename: &str) -> Result<TranspileUnits
 pub fn transpile_units_caught(
     units: Vec<u16>,
     filename: &str,
+    defines: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<TranspileUnitsOutput, String> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        transpile_units(units, filename)
+        transpile_units(units, filename, defines)
     })) {
         Ok(result) => result,
         Err(payload) => {
@@ -229,8 +273,14 @@ pub fn transpile_units_caught(
 /// [`transpile`] with panic containment: a bug in an untested AST corner must
 /// surface as a JS exception, not abort the process — napi does not catch
 /// unwinds by default, for the sync binding or async task compute alike.
-pub fn transpile_caught(input: String, filename: &str) -> Result<TranspileOutput, String> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| transpile(input, filename))) {
+pub fn transpile_caught(
+    input: String,
+    filename: &str,
+    defines: Option<&std::collections::HashMap<String, String>>,
+) -> Result<TranspileOutput, String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        transpile(input, filename, defines)
+    })) {
         Ok(result) => result,
         Err(payload) => {
             let detail = payload
@@ -257,6 +307,7 @@ mod tests {
         let output = transpile(
             "class C { private f2/**/!/**/: string; }".to_string(),
             "input.ts",
+            None,
         )
         .unwrap();
         assert_eq!(output.code, "class C {         f2/**/ /**/        ; }");
@@ -267,12 +318,13 @@ mod tests {
         let output = transpile(
             "class C { constructor(private a: string) {} }".to_string(),
             "input.ts",
+            None,
         )
         .unwrap();
         assert_eq!(output.unsupported.len(), 1);
         assert_eq!(output.unsupported[0].node_type, "TSParameterProperty");
 
-        assert!(transpile("1 + 1 as T / 2;".to_string(), "input.ts").is_err());
+        assert!(transpile("1 + 1 as T / 2;".to_string(), "input.ts", None).is_err());
     }
 
     #[test]
@@ -280,7 +332,7 @@ mod tests {
         // a file with no enum expansions or grouping-constant text splices
         // blanks in place: output length equals input length, positions intact
         let input = "const a: number = 1;\nlet b = a as string;\ntype T = typeof a;\n";
-        let output = transpile(input.to_string(), "input.ts").unwrap();
+        let output = transpile(input.to_string(), "input.ts", None).unwrap();
         assert_eq!(output.code.len(), input.len());
         assert_eq!(output.code.lines().count(), input.lines().count());
     }

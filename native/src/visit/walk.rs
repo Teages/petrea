@@ -7,14 +7,20 @@ use std::rc::Rc;
 
 use oxc_ast::AstKind;
 use oxc_ast::ast::*;
-use oxc_ast_visit::Visit;
 use oxc_parser::Token;
 use oxc_span::{GetSpan, Span};
-use oxc_syntax::node::NodeId;
 
 use super::{class, enums, expression, function, namespace, pattern, statement};
+use self::flattener::flatten_program;
+use self::scopes::{FnvBuild, prepare_enum_tables};
+
+mod flattener;
+mod scopes;
+
+// model.rs reaches the scope-introducer predicates through this module
+pub(crate) use self::scopes::{introduces_lexical_scope, is_enum_scope_container};
 use crate::blank::blank_string::BlankString;
-use crate::blank::blanker::{Blanker, UnsupportedSyntax};
+use crate::blank::blanker::{Blanker, UnsupportedSyntax, Warning};
 /// `Js`: JavaScript was (or may have been) emitted; `Blanked`: fully erased,
 /// no runtime code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,262 +33,6 @@ pub enum VisitResult {
 /// children as a first-child/next-sibling linked list (flat vectors — the
 /// per-node `Vec` this replaced dominated the pass). Scope bookkeeping is
 /// deliberately deferred to [`derive_node_scopes`], and only for enum files.
-#[derive(Default)]
-struct Flattener<'a> {
-    nodes: Vec<AstKind<'a>>,
-    first_child: Vec<u32>,
-    next_sibling: Vec<u32>,
-    last_child: Vec<u32>,
-    stack: Vec<u32>,
-    /// Flat indices of the enum declarations — the scope model and collection
-    /// pre-pass exist only for these; recording them spares a full rescan.
-    enum_indices: Vec<u32>,
-}
-
-impl<'a> Visit<'a> for Flattener<'a> {
-    fn enter_node(&mut self, kind: AstKind<'a>) {
-        let index = self.nodes.len() as u32;
-        kind.set_node_id(NodeId::new(index as usize));
-        if matches!(kind, AstKind::TSEnumDeclaration(_)) {
-            self.enum_indices.push(index);
-        }
-        if let Some(&parent) = self.stack.last() {
-            let last = self.last_child[parent as usize];
-            if last == u32::MAX {
-                self.first_child[parent as usize] = index;
-            } else {
-                self.next_sibling[last as usize] = index;
-            }
-            self.last_child[parent as usize] = index;
-        }
-        self.stack.push(index);
-        self.nodes.push(kind);
-        self.first_child.push(u32::MAX);
-        self.next_sibling.push(u32::MAX);
-        self.last_child.push(u32::MAX);
-    }
-
-    fn leave_node(&mut self, _kind: AstKind<'a>) {
-        self.stack.pop();
-    }
-
-    // TS-only subtrees the walk erases wholesale without descending: the
-    // interface/type-alias/index-signature arms of `Walker::visit_node` blank
-    // the whole span, and `namespace::should_blank_module` blanks external
-    // modules and `declare global` unconditionally. Flattening their children
-    // is dead work — record the node itself (its index is still read at
-    // statement/member level) and skip the subtree. None of them can contain
-    // an enum, so `enum_indices` and the scope model stay complete.
-    fn visit_ts_interface_declaration(&mut self, it: &TSInterfaceDeclaration<'a>) {
-        let kind = AstKind::TSInterfaceDeclaration(self.alloc(it));
-        self.enter_node(kind);
-        self.leave_node(kind);
-    }
-
-    fn visit_ts_type_alias_declaration(&mut self, it: &TSTypeAliasDeclaration<'a>) {
-        let kind = AstKind::TSTypeAliasDeclaration(self.alloc(it));
-        self.enter_node(kind);
-        self.leave_node(kind);
-    }
-
-    fn visit_ts_index_signature(&mut self, it: &TSIndexSignature<'a>) {
-        let kind = AstKind::TSIndexSignature(self.alloc(it));
-        self.enter_node(kind);
-        self.leave_node(kind);
-    }
-
-    fn visit_ts_external_module_declaration(&mut self, it: &TSExternalModuleDeclaration<'a>) {
-        let kind = AstKind::TSExternalModuleDeclaration(self.alloc(it));
-        self.enter_node(kind);
-        self.leave_node(kind);
-    }
-
-    fn visit_ts_global_declaration(&mut self, it: &TSGlobalDeclaration<'a>) {
-        let kind = AstKind::TSGlobalDeclaration(self.alloc(it));
-        self.enter_node(kind);
-        self.leave_node(kind);
-    }
-
-    // Type positions in otherwise-live code: annotations, type parameters and
-    // type arguments are blanked from the raw AST references the walk already
-    // holds (see `Blanker::blank_type_annotation`, `blank_type_parameters`),
-    // and the enum scans stop at type nodes — nothing inside a type is ever
-    // visited, so only the type node itself is recorded.
-    fn visit_ts_type_annotation(&mut self, it: &TSTypeAnnotation<'a>) {
-        let kind = AstKind::TSTypeAnnotation(self.alloc(it));
-        self.enter_node(kind);
-        self.leave_node(kind);
-    }
-
-    fn visit_ts_type_parameter_declaration(&mut self, it: &TSTypeParameterDeclaration<'a>) {
-        let kind = AstKind::TSTypeParameterDeclaration(self.alloc(it));
-        self.enter_node(kind);
-        self.leave_node(kind);
-    }
-
-    fn visit_ts_type_parameter_instantiation(&mut self, it: &TSTypeParameterInstantiation<'a>) {
-        let kind = AstKind::TSTypeParameterInstantiation(self.alloc(it));
-        self.enter_node(kind);
-        self.leave_node(kind);
-    }
-
-    fn visit_ts_class_implements(&mut self, it: &TSClassImplements<'a>) {
-        let kind = AstKind::TSClassImplements(self.alloc(it));
-        self.enter_node(kind);
-        self.leave_node(kind);
-    }
-
-    // Expressions carrying a type operand: the value expression is real JS and
-    // must stay; the type operand is erased by span.
-    fn visit_ts_as_expression(&mut self, it: &TSAsExpression<'a>) {
-        let kind = AstKind::TSAsExpression(self.alloc(it));
-        self.enter_node(kind);
-        self.visit_expression(&it.expression);
-        self.leave_node(kind);
-    }
-
-    fn visit_ts_satisfies_expression(&mut self, it: &TSSatisfiesExpression<'a>) {
-        let kind = AstKind::TSSatisfiesExpression(self.alloc(it));
-        self.enter_node(kind);
-        self.visit_expression(&it.expression);
-        self.leave_node(kind);
-    }
-
-    fn visit_ts_type_assertion(&mut self, it: &TSTypeAssertion<'a>) {
-        let kind = AstKind::TSTypeAssertion(self.alloc(it));
-        self.enter_node(kind);
-        self.visit_expression(&it.expression);
-        self.leave_node(kind);
-    }
-
-    fn visit_ts_instantiation_expression(&mut self, it: &TSInstantiationExpression<'a>) {
-        let kind = AstKind::TSInstantiationExpression(self.alloc(it));
-        self.enter_node(kind);
-        self.visit_expression(&it.expression);
-        self.leave_node(kind);
-    }
-
-    // Callee/arguments are value positions; the optional type arguments are
-    // erased by span (`expression::visit_call_or_new`).
-    fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
-        let kind = AstKind::CallExpression(self.alloc(it));
-        self.enter_node(kind);
-        self.visit_expression(&it.callee);
-        self.visit_arguments(&it.arguments);
-        self.leave_node(kind);
-    }
-
-    fn visit_new_expression(&mut self, it: &NewExpression<'a>) {
-        let kind = AstKind::NewExpression(self.alloc(it));
-        self.enter_node(kind);
-        self.visit_expression(&it.callee);
-        self.visit_arguments(&it.arguments);
-        self.leave_node(kind);
-    }
-
-    fn visit_tagged_template_expression(&mut self, it: &TaggedTemplateExpression<'a>) {
-        let kind = AstKind::TaggedTemplateExpression(self.alloc(it));
-        self.enter_node(kind);
-        self.visit_expression(&it.tag);
-        self.visit_template_literal(&it.quasi);
-        self.leave_node(kind);
-    }
-}
-
-/// Fill the parent array from the tree links — one sequential pass, cheap
-/// enough for every enum-declaring file.
-pub(crate) fn derive_parents(first_child: &[u32], next_sibling: &[u32]) -> Vec<u32> {
-    let mut parent = vec![u32::MAX; first_child.len()];
-    for idx in 0..first_child.len() as u32 {
-        let mut child = first_child[idx as usize];
-        while child != u32::MAX {
-            parent[child as usize] = idx;
-            child = next_sibling[child as usize];
-        }
-    }
-    parent
-}
-
-/// The scope each node sits in: the index of the innermost scope-introducing
-/// node at or above it (case clauses map to their switch; 0 is the program). A
-/// node's own index *is* its scope identity — no serial table; scope chains
-/// walk the introducing nodes' parents (see `enums::model::scope_chain_of`).
-/// The array is preorder, so a parent's entry is written before children read it.
-pub(crate) fn derive_node_scopes(
-    nodes: &[AstKind<'_>],
-    parent: &[u32],
-    first_child: &[u32],
-    next_sibling: &[u32],
-) -> Vec<u32> {
-    let mut node_scope = vec![0u32; nodes.len()];
-    for idx in 1..nodes.len() as u32 {
-        let kind = nodes[idx as usize];
-        node_scope[idx as usize] =
-            if is_enum_scope_container(kind) || introduces_lexical_scope(kind) {
-                idx
-            } else if matches!(kind, AstKind::SwitchCase(_)) {
-                // the cases' shared scope, keyed on the switch: a case opens it,
-                // the discriminant (a sibling subtree) stays in the enclosing scope
-                parent[idx as usize]
-            } else if matches!(
-                nodes[parent[idx as usize] as usize],
-                AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)
-            ) {
-                // everything directly inside a function that is not its parameters
-                // or (braced) body — an expression-bodied arrow's body, type
-                // positions — evaluates in the parameter environment, a *sibling*
-                // subtree parent propagation cannot see (FormalParameters precedes
-                // the body in preorder, so its entry is already filled here)
-                let function = parent[idx as usize];
-                let mut child = first_child[function as usize];
-                let mut scope = node_scope[function as usize];
-                while child != u32::MAX {
-                    if matches!(nodes[child as usize], AstKind::FormalParameters(_)) {
-                        scope = node_scope[child as usize];
-                        break;
-                    }
-                    child = next_sibling[child as usize];
-                }
-                scope
-            } else {
-                node_scope[parent[idx as usize] as usize]
-            };
-    }
-    node_scope
-}
-
-/// Statement-list containers; each gets its own scope serial, which enum
-/// merge groups key their member tables on.
-pub(crate) fn is_enum_scope_container(kind: AstKind<'_>) -> bool {
-    matches!(
-        kind,
-        AstKind::Program(_)
-            | AstKind::BlockStatement(_)
-            | AstKind::FunctionBody(_)
-            | AstKind::TSModuleBlock(_)
-            | AstKind::StaticBlock(_)
-    )
-}
-
-/// Nodes introducing a lexical scope beyond the statement-list containers:
-/// function parameter environments (an expression-bodied arrow's body
-/// evaluates there), loop heads, class name scopes, catch clauses. Each gets
-/// its own serial, so const resolution walks real parent scopes instead of
-/// approximating them. A switch's cases share one scope too — opened at the
-/// first case, after the discriminant evaluated in the enclosing scope.
-pub(crate) fn introduces_lexical_scope(kind: AstKind<'_>) -> bool {
-    matches!(
-        kind,
-        AstKind::FormalParameters(_)
-            | AstKind::ForStatement(_)
-            | AstKind::ForInStatement(_)
-            | AstKind::ForOfStatement(_)
-            | AstKind::Class(_)
-            | AstKind::CatchClause(_)
-            | AstKind::TSEnumDeclaration(_)
-    )
-}
-
 pub struct Walker<'a> {
     pub src: &'a str,
     pub blanker: Blanker<'a>,
@@ -314,27 +64,26 @@ pub struct Walker<'a> {
     /// the scope array exists only when binding resolution needs it.
     pub(crate) parent: Vec<u32>,
     pub(crate) node_scope: Vec<u32>,
-}
-
-/// Two tiers: parents are cheap and every enum-declaring file gets them; the
-/// scope serials and the whole-file binding registry exist only for binding
-/// resolution — self-contained enums (the common case) skip the heavy model,
-/// and [`enums::collect::collect_enum_declarations`] decides by requesting it.
-fn prepare_enum_tables(walker: &mut Walker<'_>, enum_indices: &[u32]) {
-    walker.parent = derive_parents(&walker.first_child, &walker.next_sibling);
-    let mut collected = enums::collect::collect_enum_declarations(walker, enum_indices);
-    if collected.needs_scope_model {
-        walker.node_scope = derive_node_scopes(
-            &walker.nodes,
-            &walker.parent,
-            &walker.first_child,
-            &walker.next_sibling,
-        );
-        collected = enums::collect::collect_enum_declarations(walker, enum_indices);
-    }
-    walker.enum_members = Rc::new(collected.table);
-    walker.const_bindings = Rc::new(collected.bindings);
-    walker.enum_folds = collected.folds;
+    /// esbuild-style defines; `None` on every define-free transpile, so all
+    /// substitution paths early-out and the walk is unchanged.
+    pub(crate) defines: Option<&'a crate::defines::Defines>,
+    /// Whether any `with` statement exists (recovered parses included) —
+    /// lets `inside_with` skip its ancestor walk on the common file.
+    pub(crate) has_with: bool,
+    /// Whether any JSX syntax exists — every tag-position guard and member-tag
+    /// probe early-outs when the file cannot contain one.
+    pub(crate) has_jsx: bool,
+    /// The relevant names the gate scan found bound (enum-free define files
+    /// only): [`crate::visit::define`] answers shadow queries for names
+    /// outside it as global without a scope walk.
+    pub(crate) bound_relevant: Option<Vec<&'a str>>,
+    /// Memoized (scope, name) → binding resolutions; bindings freeze after
+    /// the prepare pass, so entries stay valid for the whole walk. A plain
+    /// map (no interior mutability) keeps `Walker` covariant over `'a`.
+    /// FNV-hashed: SipHash costs more than the few scope hops a memo hit
+    /// saves, which is the same reason [`crate::visit::define`] keeps
+    /// shallow chains out of the memo entirely.
+    pub(crate) binding_cache: std::collections::HashMap<(u32, &'a str), crate::visit::define::NameBinding, FnvBuild>,
 }
 
 /// Iterator over the linked-list children of a node, in visit order.
@@ -363,19 +112,33 @@ pub fn blank_program<'a>(
     program: &Program<'a>,
     src: &'a str,
     tokens: &'a [Token],
-) -> (BlankString, Vec<UnsupportedSyntax>) {
-    let mut flattener = Flattener::default();
-    flattener.visit_program(program);
-    let enum_indices = flattener.enum_indices;
+    defines: Option<&crate::defines::Defines>,
+) -> (BlankString, Vec<UnsupportedSyntax>, Vec<Warning>) {
+    // the define gates fold into the flattening pass: the relevant set and
+    // its first-byte bitmap are known up front, so parents, `with`/JSX
+    // presence and relevant-name bindings are recorded at node push
+    let defines_active = defines.is_some_and(|d| !d.is_empty());
+    let flat = flatten_program(program, defines);
+    let enum_indices = flat.enum_indices;
+    let gates = flat.gates;
+    let relevant = flat.relevant;
+    // `gates.bound` stays collected on enum files (their `bound_relevant`
+    // fast path is None for the member-scope caveat) — the model decision
+    // reads it directly, plus the member-name collision flag: either one
+    // means a define decision can still turn on a precise resolution
+    let defines_need_model = !gates.bound.is_empty()
+        || gates.member_relevant
+        || (!enum_indices.is_empty() && defines.is_some_and(|d| d.has_entity_values()));
+    let define_name_filter = (defines_need_model && enum_indices.is_empty()).then_some(relevant);
 
     let mut walker = Walker {
         src,
         blanker: Blanker::new(src, tokens),
         units: None,
         byte_to_unit: None,
-        nodes: flattener.nodes,
-        first_child: flattener.first_child,
-        next_sibling: flattener.next_sibling,
+        nodes: flat.nodes,
+        first_child: flat.first_child,
+        next_sibling: flat.next_sibling,
         scratch_pool: Vec::new(),
         parent_statement: None,
         enum_members: Rc::new(HashMap::new()),
@@ -384,8 +147,13 @@ pub fn blank_program<'a>(
             enum_scopes: HashMap::new(),
         }),
         enum_folds: HashMap::new(),
-        parent: Vec::new(),
         node_scope: Vec::new(),
+        defines,
+        parent: flat.parent,
+        has_with: gates.has_with,
+        has_jsx: gates.has_jsx,
+        bound_relevant: (defines_active && enum_indices.is_empty()).then_some(gates.bound),
+        binding_cache: std::collections::HashMap::default(),
     };
 
     // directives are prepended to the statement list (statement-like, not a function body)
@@ -396,13 +164,18 @@ pub fn blank_program<'a>(
     for stmt in &program.body {
         indices.push(statement_index(stmt));
     }
-    if !enum_indices.is_empty() {
-        prepare_enum_tables(&mut walker, &enum_indices);
+    if !enum_indices.is_empty() || defines_active {
+        prepare_enum_tables(
+            &mut walker,
+            &enum_indices,
+            defines_need_model,
+            define_name_filter.as_deref(),
+        );
     }
     walker.visit_node_array(&indices, true, false);
 
     let blanker = walker.blanker;
-    (blanker.output, blanker.reports)
+    (blanker.output, blanker.reports, blanker.warnings)
 }
 
 /// UTF-16 variant of [`blank_program`]: `parse_copy` is the lossy UTF-8 copy
@@ -414,19 +187,33 @@ pub fn blank_program_utf16<'a>(
     parse_copy: &'a str,
     byte_to_unit: &'a [u32],
     tokens: &'a [Token],
-) -> (BlankString, Vec<UnsupportedSyntax>) {
-    let mut flattener = Flattener::default();
-    flattener.visit_program(program);
-    let enum_indices = flattener.enum_indices;
+    defines: Option<&crate::defines::Defines>,
+) -> (BlankString, Vec<UnsupportedSyntax>, Vec<Warning>) {
+    // the define gates fold into the flattening pass: the relevant set and
+    // its first-byte bitmap are known up front, so parents, `with`/JSX
+    // presence and relevant-name bindings are recorded at node push
+    let defines_active = defines.is_some_and(|d| !d.is_empty());
+    let flat = flatten_program(program, defines);
+    let enum_indices = flat.enum_indices;
+    let gates = flat.gates;
+    let relevant = flat.relevant;
+    // `gates.bound` stays collected on enum files (their `bound_relevant`
+    // fast path is None for the member-scope caveat) — the model decision
+    // reads it directly, plus the member-name collision flag: either one
+    // means a define decision can still turn on a precise resolution
+    let defines_need_model = !gates.bound.is_empty()
+        || gates.member_relevant
+        || (!enum_indices.is_empty() && defines.is_some_and(|d| d.has_entity_values()));
+    let define_name_filter = (defines_need_model && enum_indices.is_empty()).then_some(relevant);
 
     let mut walker = Walker {
         src: parse_copy,
         blanker: Blanker::new(parse_copy, tokens),
         units: Some(units),
         byte_to_unit: Some(byte_to_unit),
-        nodes: flattener.nodes,
-        first_child: flattener.first_child,
-        next_sibling: flattener.next_sibling,
+        nodes: flat.nodes,
+        first_child: flat.first_child,
+        next_sibling: flat.next_sibling,
         scratch_pool: Vec::new(),
         parent_statement: None,
         enum_members: Rc::new(HashMap::new()),
@@ -435,8 +222,13 @@ pub fn blank_program_utf16<'a>(
             enum_scopes: HashMap::new(),
         }),
         enum_folds: HashMap::new(),
-        parent: Vec::new(),
         node_scope: Vec::new(),
+        defines,
+        parent: flat.parent,
+        has_with: gates.has_with,
+        has_jsx: gates.has_jsx,
+        bound_relevant: (defines_active && enum_indices.is_empty()).then_some(gates.bound),
+        binding_cache: std::collections::HashMap::default(),
     };
 
     let mut indices = Vec::with_capacity(program.directives.len() + program.body.len());
@@ -446,13 +238,18 @@ pub fn blank_program_utf16<'a>(
     for stmt in &program.body {
         indices.push(statement_index(stmt));
     }
-    if !enum_indices.is_empty() {
-        prepare_enum_tables(&mut walker, &enum_indices);
+    if !enum_indices.is_empty() || defines_active {
+        prepare_enum_tables(
+            &mut walker,
+            &enum_indices,
+            defines_need_model,
+            define_name_filter.as_deref(),
+        );
     }
     walker.visit_node_array(&indices, true, false);
 
     let blanker = walker.blanker;
-    (blanker.output, blanker.reports)
+    (blanker.output, blanker.reports, blanker.warnings)
 }
 
 /// Unit index of the unit starting at byte offset `pos` (maps are strictly increasing).
@@ -713,11 +510,39 @@ impl<'a> Walker<'a> {
     pub(crate) fn visit_node(&mut self, idx: u32) -> VisitResult {
         let kind = self.nodes[idx as usize];
         match kind {
-            // all identifier flavors are plain JS
-            AstKind::IdentifierReference(_)
-            | AstKind::IdentifierName(_)
+            // a reference may carry a define substitution; the other
+            // identifier flavors are plain JS
+            AstKind::IdentifierReference(n) => {
+                if self.defines.is_some() {
+                    self.substitute_identifier_define(idx, n.name.as_str(), n.span());
+                }
+                VisitResult::Js
+            }
+            AstKind::IdentifierName(_)
             | AstKind::BindingIdentifier(_)
             | AstKind::LabelIdentifier(_) => VisitResult::Js,
+
+            // a member chain may match a dotted define; unmatched chains fall
+            // through to the child walk, which retries the shorter suffixes
+            AstKind::StaticMemberExpression(_)
+            | AstKind::ComputedMemberExpression(_) => {
+                if self.defines.is_some() && self.substitute_member_define(idx) {
+                    VisitResult::Js
+                } else {
+                    self.visit_children(idx)
+                }
+            }
+
+            // bare `this` / `import.meta` may carry their own defines
+            AstKind::ThisExpression(n) => {
+                self.substitute_this_define(idx, n.span());
+                VisitResult::Js
+            }
+
+            AstKind::ImportMeta(n) => {
+                self.substitute_import_meta_define(idx, n.span());
+                VisitResult::Js
+            }
 
             AstKind::ImportDeclaration(n) => statement::visit_import_declaration(self, n),
 

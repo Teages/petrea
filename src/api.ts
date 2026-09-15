@@ -1,10 +1,12 @@
 import type { TranspileOptions } from './types'
 
-export type { OnError, TranspileOptions, UnsupportedSyntax } from './types'
+export type { OnError, OnWarn, TranspileOptions, UnsupportedSyntax, Warning } from './types'
 
 export interface NativeOptions {
   lang?: string
   filename?: string
+  /** esbuild-style defines; see `TranspileOptions.define`. */
+  define?: Record<string, string>
 }
 
 export interface NativeUnsupported {
@@ -13,14 +15,22 @@ export interface NativeUnsupported {
   end: number
 }
 
+export interface NativeWarning {
+  kind: string
+  start: number
+  end: number
+}
+
 export interface NativeResult {
   code: string
   unsupported: NativeUnsupported[]
+  warnings: NativeWarning[]
 }
 
 export interface NativeUnitsResult {
   code: Uint16Array
   unsupported: NativeUnsupported[]
+  warnings: NativeWarning[]
 }
 
 export interface NativeBinding {
@@ -67,6 +77,7 @@ function toNativeOptions(options: TranspileOptions): NativeOptions {
   return {
     lang: options.lang,
     filename: options.filename,
+    define: options.define && { ...options.define },
   }
 }
 
@@ -79,6 +90,19 @@ function dispatchReports(
       type: report.nodeType,
       start: report.start,
       end: report.end,
+    })
+  }
+}
+
+function dispatchWarnings(
+  warnings: NativeWarning[],
+  options: TranspileOptions,
+): void {
+  for (const warning of warnings) {
+    options.onWarn?.({
+      type: warning.kind,
+      start: warning.start,
+      end: warning.end,
     })
   }
 }
@@ -143,6 +167,7 @@ export function createApi(load: () => NativeBinding | undefined): {
           throw new SyntaxError(error instanceof Error ? error.message : String(error))
         })
       dispatchReports(result.unsupported, options)
+      dispatchWarnings(result.warnings, options)
       return fromUtf16Units(result.code)
     }
     const result = await native
@@ -151,6 +176,7 @@ export function createApi(load: () => NativeBinding | undefined): {
         throw new SyntaxError(error instanceof Error ? error.message : String(error))
       })
     dispatchReports(result.unsupported, options)
+    dispatchWarnings(result.warnings, options)
     return result.code
   }
 
@@ -174,6 +200,7 @@ export function createApi(load: () => NativeBinding | undefined): {
         throw new SyntaxError(error instanceof Error ? error.message : String(error))
       }
       dispatchReports(unitsResult.unsupported, options)
+      dispatchWarnings(unitsResult.warnings, options)
       return fromUtf16Units(unitsResult.code)
     }
     // exceptions thrown from `options.onError` propagate unchanged
@@ -185,6 +212,7 @@ export function createApi(load: () => NativeBinding | undefined): {
       throw new SyntaxError(error instanceof Error ? error.message : String(error))
     }
     dispatchReports(result.unsupported, options)
+    dispatchWarnings(result.warnings, options)
     return result.code
   }
 
