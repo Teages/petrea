@@ -75,29 +75,27 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - if: runner.os != 'Windows'
         run: npm i -g corepack@latest && corepack enable
       # the windows image ships corepack; reinstalling it globally collides
       # with the preinstalled yarn shims (npm EEXIST)
       - if: runner.os == 'Windows'
         run: corepack enable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: native
           key: ${{ matrix.target }}
       - if: matrix.cross
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
       - if: matrix.cross
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
         with:
           tool: cargo-zigbuild
       - if: matrix.target == 'x86_64-apple-darwin'
@@ -138,7 +136,7 @@ jobs:
         name: Install Rosetta 2 (no-op when already present)
         run: softwareupdate --install-rosetta --agree-to-license || true
       - if: matrix.smoke == 'rosetta'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           architecture: x64
@@ -154,13 +152,13 @@ jobs:
         name: Smoke test (wasm binding in Node)
         run: node scripts/smoke-native.mjs npm/wasm32-wasip1/binding.wasip1.cjs
       - if: ${{ !matrix.wasm }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binding-${{ matrix.target }}
           path: dist/${{ matrix.artifact }}
           if-no-files-found: error
       - if: matrix.wasm
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binding-${{ matrix.target }}
           path: npm/wasm32-wasip1/binding.*
@@ -173,11 +171,11 @@ jobs:
     needs: build
     runs-on: windows-11-arm
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: binding-aarch64-pc-windows-msvc
           path: dist
@@ -193,11 +191,11 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: binding-aarch64-unknown-linux-*
           merge-multiple: true
