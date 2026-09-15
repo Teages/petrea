@@ -13,26 +13,26 @@ describe('define', () => {
   describe('replacement', () => {
     it('replaces a bare global identifier', () => {
       const output = transpile('console.log(__DEV__)', { define: { __DEV__: 'true' } })
-      expect(output).toContain('console.log(true)')
+      expect(output).toContain('console.log(true   )')
       expect(output).not.toContain('__DEV__')
-      expect(output).toMatchInlineSnapshot(`"console.log(true)"`)
+      expect(output).toMatchInlineSnapshot(`"console.log(true   )"`)
     })
 
     it('replaces a dotted global path', () => {
       const output = transpile('console.log(process.env.NODE_ENV)', {
         define: { 'process.env.NODE_ENV': '"production"' },
       })
-      expect(output).toContain('console.log("production")')
+      expect(output).toContain('console.log("production"        )')
       expect(output).not.toContain('NODE_ENV')
-      expect(output).toMatchInlineSnapshot(`"console.log("production")"`)
+      expect(output).toMatchInlineSnapshot(`"console.log("production"        )"`)
     })
 
     it('replaces a string-indexed chain', () => {
       const output = transpile('console.log(process.env["NODE_ENV"])', {
         define: { 'process.env.NODE_ENV': '"production"' },
       })
-      expect(output).toContain('console.log("production")')
-      expect(output).toMatchInlineSnapshot(`"console.log("production")"`)
+      expect(output).toContain('console.log("production"           )')
+      expect(output).toMatchInlineSnapshot(`"console.log("production"           )"`)
     })
 
     it('splices an entity-name value literally', () => {
@@ -53,9 +53,9 @@ describe('define', () => {
 
     it('prefers the longest matching key', () => {
       const output = transpile('log(a.b.c)', { define: { 'a.b': '1', 'a.b.c': '2' } })
-      expect(output).toContain('log(2)')
+      expect(output).toContain('log(2    )')
       expect(output).not.toContain('a.b.c')
-      expect(output).toMatchInlineSnapshot(`"log(2)"`)
+      expect(output).toMatchInlineSnapshot(`"log(2    )"`)
     })
 
     it('separates a numeric literal from a following member dot', () => {
@@ -63,12 +63,12 @@ describe('define', () => {
         ['log(foo.NODE_ENV)', 'log(foo.NODE_ENV.x)'].join('\n'),
         { define: { 'foo.NODE_ENV': '42' } },
       )
-      expect(output).toContain('log(42)')
-      expect(output).toContain('42 .x')
+      expect(output).toContain('log(42          )')
+      expect(output).toContain('42          .x')
       expect(output).not.toContain('42.x')
       expect(output).toMatchInlineSnapshot(`
-        "log(42)
-        log(42 .x)"
+        "log(42          )
+        log(42          .x)"
       `)
     })
 
@@ -77,11 +77,11 @@ describe('define', () => {
         ['log(cfg.REV)', 'log(cfg.BIG)'].join('\n'),
         { define: { 'cfg.REV': '1e3', 'cfg.BIG': '123n' } },
       )
-      expect(output).toContain('log(1e3)')
-      expect(output).toContain('log(123n)')
+      expect(output).toContain('log(1e3    )')
+      expect(output).toContain('log(123n   )')
       expect(output).toMatchInlineSnapshot(`
-        "log(1e3)
-        log(123n)"
+        "log(1e3    )
+        log(123n   )"
       `)
     })
 
@@ -89,17 +89,17 @@ describe('define', () => {
       const output = transpile('const t = typeof __DEV__', { define: { __DEV__: 'true' } })
       expect(output).toContain('typeof true')
       expect(output).not.toContain('"boolean"')
-      expect(output).toMatchInlineSnapshot(`"const t = typeof true"`)
+      expect(output).toMatchInlineSnapshot(`"const t = typeof true   "`)
     })
 
     it('does not fold replaced branches or drop code', () => {
       const output = transpile('if (__DEV__) {\n  sideEffect()\n}', {
         define: { __DEV__: 'false' },
       })
-      expect(output).toContain('if (false)')
+      expect(output).toContain('if (false  )')
       expect(output).toContain('sideEffect()')
       expect(output).toMatchInlineSnapshot(`
-        "if (false) {
+        "if (false  ) {
           sideEffect()
         }"
       `)
@@ -114,8 +114,8 @@ describe('define', () => {
 
     it('replaces a whole optional chain', () => {
       const output = transpile('log(a?.b.c)', { define: { 'a.b.c': '2' } })
-      expect(output).toContain('log(2)')
-      expect(output).toMatchInlineSnapshot(`"log(2)"`)
+      expect(output).toContain('log(2     )')
+      expect(output).toMatchInlineSnapshot(`"log(2     )"`)
     })
 
     it('replaces a prefix inside an optional chain', () => {
@@ -151,8 +151,8 @@ describe('define', () => {
 
     it('replaces inside template interpolations', () => {
       const output = transpile('const s = `${__DEV__}`', { define: { __DEV__: 'true' } })
-      expect(output).toContain('\${true}')
-      expect(output).toMatchInlineSnapshot(`"const s = \`\${true}\`"`)
+      expect(output).toContain('\${true   }')
+      expect(output).toMatchInlineSnapshot(`"const s = \`\${true   }\`"`)
     })
 
     it('replaces default parameters and computed keys', () => {
@@ -161,10 +161,10 @@ describe('define', () => {
         { define: { __DEV__: 'true' } },
       )
       expect(output).toContain('a = true')
-      expect(output).toContain('[true]: 1')
+      expect(output).toContain('[true   ]: 1')
       expect(output).toMatchInlineSnapshot(`
-        "function f(a = true) {}
-        const o = { [true]: 1 }"
+        "function f(a = true   ) {}
+        const o = { [true   ]: 1 }"
       `)
     })
 
@@ -172,25 +172,25 @@ describe('define', () => {
       const output = transpile('const x = __DEV__ as any', { define: { __DEV__: 'true' } })
       expect(output).toContain('true')
       expect(output).not.toContain('__DEV__')
-      expect(output).toMatchInlineSnapshot(`"const x = true;      "`)
+      expect(output).toMatchInlineSnapshot(`"const x = true   ;      "`)
     })
 
     it('replaces a whole chain with the optional link last', () => {
       const output = transpile('log(a.b?.c)', { define: { 'a.b.c': '2' } })
-      expect(output).toContain('log(2)')
-      expect(output).toMatchInlineSnapshot(`"log(2)"`)
+      expect(output).toContain('log(2     )')
+      expect(output).toMatchInlineSnapshot(`"log(2     )"`)
     })
 
     it('replaces mixed dot/index optional chains', () => {
       const output = transpile('log(a[\'b\']?.[\'c\'])', { define: { 'a.b.c': '2' } })
-      expect(output).toContain('log(2)')
-      expect(output).toMatchInlineSnapshot(`"log(2)"`)
+      expect(output).toContain('log(2            )')
+      expect(output).toMatchInlineSnapshot(`"log(2            )"`)
     })
 
     it('replaces the prefix before an optional link', () => {
       const output = transpile('log(a.b?.c)', { define: { 'a.b': '1' } })
-      expect(output).toContain('1?.c')
-      expect(output).toMatchInlineSnapshot(`"log(1?.c)"`)
+      expect(output).toContain('1  ?.c')
+      expect(output).toMatchInlineSnapshot(`"log(1  ?.c)"`)
     })
 
     it('replaces a member chain under delete', () => {
@@ -198,7 +198,7 @@ describe('define', () => {
         define: { 'process.env.NODE_ENV': '"production"' },
       })
       expect(output).toContain('delete "production"')
-      expect(output).toMatchInlineSnapshot(`"delete "production""`)
+      expect(output).toMatchInlineSnapshot(`"delete "production"        "`)
     })
   })
 })

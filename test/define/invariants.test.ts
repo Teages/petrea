@@ -20,7 +20,7 @@ describe('define', () => {
       expect(output).toContain('const other = 2')
       expect(output.split('\n')).toHaveLength(2)
       expect(output).toMatchInlineSnapshot(`
-        "const mode = "production"
+        "const mode = "production"        
         const other = 2"
       `)
     })
@@ -30,7 +30,7 @@ describe('define', () => {
       expect(output).not.toContain('__DEV__')
       const E = new Function(`${output}; return E`)() as Record<string, unknown>
       expect(E.A).toBe(true)
-      expect(output).toMatchInlineSnapshot(`"var  E; (function (E) { E[E["A"] = true] = "A" })(E || (E = {}));"`)
+      expect(output).toMatchInlineSnapshot(`"var  E; (function (E) { E[E["A"] = true   ] = "A" })(E || (E = {}));"`)
     })
 
     it('qualifies an entity value captured as an enum member', () => {

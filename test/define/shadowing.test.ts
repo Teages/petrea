@@ -23,7 +23,7 @@ describe('define', () => {
         ].join('\n'),
         { define },
       )
-      expect(output).toContain('log(1, 1, 1, 1)')
+      expect(output).toContain('log(1   , 1    , 1    , 1    )')
       expect(output).toContain('kept')
     })
 
@@ -36,7 +36,7 @@ describe('define', () => {
         ].join('\n'),
         { define: { FLAG: '2' } },
       )
-      expect(output).toContain('log(2)')
+      expect(output).toContain('log(2   )')
       expect(output).toContain('return FLAG')
     })
 
@@ -50,7 +50,7 @@ describe('define', () => {
         ].join('\n'),
         { define: { FLAG: '1', TFLAG: '3' } },
       )
-      expect(output).toContain('log(FLAG, 3)')
+      expect(output).toContain('log(FLAG, 3    )')
       expect(output).toContain('import FLAG = ns.foo')
     })
 
@@ -64,7 +64,7 @@ describe('define', () => {
       // the plain `__proto__:` spelling would set the prototype instead of
       // defining the own property the shorthand reads
       expect(output).toContain('{["__proto__"]: null}')
-      expect(output).toContain('{ other: null }')
+      expect(output).toContain('{ other: null      }')
     })
 
     it('parenthesizes async in a for-of write target', () => {
@@ -105,9 +105,9 @@ describe('define', () => {
         ].join('\n'),
         { define: { 'this.x': '1', 'this.y': '2', 'this.z': '3' } },
       )
-      expect(output).toContain('@dec(1)')
-      expect(output).toContain('@dec(2)')
-      expect(output).toContain('@dec(3)')
+      expect(output).toContain('@dec(1     )')
+      expect(output).toContain('@dec(2     )')
+      expect(output).toContain('@dec(3     )')
       expect(output).toContain('this.w')
     })
 
@@ -123,7 +123,7 @@ describe('define', () => {
       )
       expect(output).toContain('return arguments.length')
       expect(output).toContain('() => arguments')
-      expect(output).toContain('log(0)')
+      expect(output).toContain('log(0               )')
       expect(output).not.toContain('log(arguments.length)')
     })
 
@@ -133,7 +133,7 @@ describe('define', () => {
         { define: { 'arguments.length': '0', 'arguments': 'null' } },
       )
       expect(output).toContain('() => 0')
-      expect(output).toContain('log(null)')
+      expect(output).toContain('log(null     )')
     })
 
     it('parenthesizes a unary splice as a private field object', () => {
@@ -153,7 +153,7 @@ describe('define', () => {
         'class K { #x = 1\n  m() { return FLAG.#x } }',
         { define: { FLAG: '42' } },
       )
-      expect(output).toContain('42 .#x')
+      expect(output).toContain('42  .#x')
       expect(output).not.toContain('42.#x')
     })
 
@@ -209,7 +209,7 @@ describe('define', () => {
         'enum E { A }\nlog(FLAG)',
         { define: { FLAG: '1' } },
       )
-      expect(output).toContain('log(1)')
+      expect(output).toContain('log(1   )')
       expect(output).not.toContain('log(FLAG)')
     })
 
@@ -231,7 +231,7 @@ describe('define', () => {
           let process = { env: { NODE_ENV: "x" } }
           console.log(process.env.NODE_ENV)
         }
-        console.log("production")"
+        console.log("production"        )"
       `)
     })
 
@@ -251,7 +251,7 @@ describe('define', () => {
         "function f(process     ) {
           return process.env.NODE_ENV
         }
-        console.log("production")"
+        console.log("production"        )"
       `)
     })
 
@@ -320,7 +320,7 @@ describe('define', () => {
       expect(output).toMatchInlineSnapshot(`
         "class C {
           process = 1
-          m() { return "production" }
+          m() { return "production"         }
         }"
       `)
     })
