@@ -111,9 +111,10 @@ pub(crate) fn register_other_node<'a>(
         // it introduces must shadow like any other — but a type-only one is
         // erased and binds nothing
         AstKind::TSImportEqualsDeclaration(node)
-            if node.import_kind == ImportOrExportKind::Value => {
-                bind_shadow(bindings, w.node_scope(idx), node.id.name.as_str(), filter);
-            }
+            if node.import_kind == ImportOrExportKind::Value =>
+        {
+            bind_shadow(bindings, w.node_scope(idx), node.id.name.as_str(), filter);
+        }
         _ => {}
     }
 }

@@ -100,8 +100,12 @@ pub fn transpile(
         return Err(format!("failed to parse {filename}:\n{details}"));
     }
 
-    let (output, unsupported, warnings) =
-        blank_program(&return_value.program, input.as_str(), &return_value.tokens, defines.as_ref());
+    let (output, unsupported, warnings) = blank_program(
+        &return_value.program,
+        input.as_str(),
+        &return_value.tokens,
+        defines.as_ref(),
+    );
     // the input is still alive here but consumed by build_owned below, so the
     // report offsets (UTF-8 bytes) are converted to the promised UTF-16 units first
     let unsupported = unsupported

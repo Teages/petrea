@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{Expression, UnaryOperator};
 use oxc_parser::Parser;
-use oxc_span::SourceType;
 use oxc_span::GetSpan;
+use oxc_span::SourceType;
 
 /// The root of a define key (and of a member chain matched against it).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +138,9 @@ impl Defines {
         if !has_first_bit(&self.ident_first, name) {
             return None;
         }
-        self.identifiers.get(name).map(|&i| &self.values[i as usize])
+        self.identifiers
+            .get(name)
+            .map(|&i| &self.values[i as usize])
     }
 
     pub(crate) fn this(&self) -> Option<&DefineValue> {
@@ -177,9 +179,9 @@ impl Defines {
     /// never resolve a name, so enum-declaring files can skip the model for
     /// them exactly like enum-free ones.
     pub(crate) fn has_entity_values(&self) -> bool {
-        self.values.iter().any(|value| {
-            matches!(&value.root, Some(ChainRoot::Ident(_)))
-        })
+        self.values
+            .iter()
+            .any(|value| matches!(&value.root, Some(ChainRoot::Ident(_))))
     }
 
     /// The bucket of multi-segment keys whose tail is `tail`, first-byte
@@ -191,8 +193,7 @@ impl Defines {
             if !self.dotted_empty_tail {
                 return None;
             }
-        }
-        else if !has_first_bit(&self.dotted_first, tail) {
+        } else if !has_first_bit(&self.dotted_first, tail) {
             return None;
         }
         self.dotted.get(tail).map(Vec::as_slice)
@@ -200,7 +201,11 @@ impl Defines {
 
     /// The longest key in `bucket`, bounding how far a chain walk may go.
     pub(crate) fn bucket_limit(bucket: &[DotEntry]) -> usize {
-        bucket.iter().map(|entry| entry.segments.len()).max().unwrap_or(0)
+        bucket
+            .iter()
+            .map(|entry| entry.segments.len())
+            .max()
+            .unwrap_or(0)
     }
 
     /// The value a member chain maps to. `chain` holds the property names
@@ -274,8 +279,7 @@ impl Defines {
         for tail in defines.dotted.keys() {
             if tail.is_empty() {
                 defines.dotted_empty_tail = true;
-            }
-            else {
+            } else {
                 set_first_bit(&mut defines.dotted_first, tail);
             }
         }
@@ -360,8 +364,8 @@ fn parse_value(value: &str, allocator: &Allocator) -> Result<DefineValue, String
     let string = matches!(parsed, Expression::StringLiteral(_));
     // identifiers and dotted chains are assignable — including `null.x`,
     // a dot chain to esbuild; bare `this`/`import.meta` and literals are not
-    let assignable = null_rooted
-        || (root.is_some() && (matches!(root, Some(ChainRoot::Ident(_))) || depth > 0));
+    let assignable =
+        null_rooted || (root.is_some() && (matches!(root, Some(ChainRoot::Ident(_))) || depth > 0));
     // `undefined` resolves to EUndefined in esbuild — never a local binding
     // — and the shadow-immune spelling of that is `void 0`, also when the
     // value chains off it: `undefined.x` is `(void 0).x` there
@@ -522,9 +526,21 @@ mod tests {
         assert!(defines.identifier("w").unwrap().assignable);
         assert!(defines.identifier("g").unwrap().assignable);
         assert!(!defines.identifier("c").unwrap().assignable);
-        assert!(defines.dotted(&["k", "j"], ChainRootRef::Ident("i")).is_some());
-        assert!(defines.dotted(&["class"], ChainRootRef::Ident("k")).is_some());
-        assert!(defines.dotted(&["MODE", "env"], ChainRootRef::ImportMeta).is_some());
+        assert!(
+            defines
+                .dotted(&["k", "j"], ChainRootRef::Ident("i"))
+                .is_some()
+        );
+        assert!(
+            defines
+                .dotted(&["class"], ChainRootRef::Ident("k"))
+                .is_some()
+        );
+        assert!(
+            defines
+                .dotted(&["MODE", "env"], ChainRootRef::ImportMeta)
+                .is_some()
+        );
         assert!(defines.dotted(&["j"], ChainRootRef::Ident("i")).is_none());
         assert!(defines.dotted(&["k", "j"], ChainRootRef::This).is_none());
         // a bracket-spelled key matches a dot-spelled chain and vice versa
@@ -532,31 +548,72 @@ mod tests {
         let filtered = build(&[("a.key", "1")]).unwrap();
         assert!(filtered.dotted_bucket("").is_none());
         assert!(filtered.dotted_bucket("z").is_none());
-        assert_eq!(Defines::bucket_limit(filtered.dotted_bucket("key").unwrap()), 1);
+        assert_eq!(
+            Defines::bucket_limit(filtered.dotted_bucket("key").unwrap()),
+            1
+        );
         assert!(build(&[("a.key", "1")]).unwrap().identifier("b").is_none());
         // an empty-string tail segment is representable and stays reachable
         assert_eq!(
-            Defines::bucket_limit(build(&[("x[\"\"]", "1")]).unwrap().dotted_bucket("").unwrap()),
+            Defines::bucket_limit(
+                build(&[("x[\"\"]", "1")])
+                    .unwrap()
+                    .dotted_bucket("")
+                    .unwrap()
+            ),
             1,
         );
         // trailing comments in the value text are dropped with the trivia
-        assert_eq!(build(&[("c", "1 //c")]).unwrap().identifier("c").unwrap().text, "1");
         assert_eq!(
-            build(&[("c", "\"s\" /*t*/")]).unwrap().identifier("c").unwrap().text,
+            build(&[("c", "1 //c")])
+                .unwrap()
+                .identifier("c")
+                .unwrap()
+                .text,
+            "1"
+        );
+        assert_eq!(
+            build(&[("c", "\"s\" /*t*/")])
+                .unwrap()
+                .identifier("c")
+                .unwrap()
+                .text,
             "\"s\""
         );
         let bracket = build(&[("x.y[\"z\"]", "true")]).unwrap();
-        assert!(bracket.dotted(&["z", "y"], ChainRootRef::Ident("x")).is_some());
+        assert!(
+            bracket
+                .dotted(&["z", "y"], ChainRootRef::Ident("x"))
+                .is_some()
+        );
         assert!(bracket.dotted(&["z"], ChainRootRef::Ident("x")).is_none());
     }
 
     #[test]
     fn rejects_bad_keys_and_values() {
-        for key in ["", "a..b", "a b", "import", "import.env", "await", "3x", "x[y]", "a[0]"] {
-            assert!(build(&[(key, "1")]).is_err(), "key {key:?} should be rejected");
+        for key in [
+            "",
+            "a..b",
+            "a b",
+            "import",
+            "import.env",
+            "await",
+            "3x",
+            "x[y]",
+            "a[0]",
+        ] {
+            assert!(
+                build(&[(key, "1")]).is_err(),
+                "key {key:?} should be rejected"
+            );
         }
-        for value in ["", "1 + 2", "foo()", "{ a: 1 }", "`t${x}`", "+1", "-x", "!0", "[1, 2]"] {
-            assert!(build(&[("x", value)]).is_err(), "value {value:?} should be rejected");
+        for value in [
+            "", "1 + 2", "foo()", "{ a: 1 }", "`t${x}`", "+1", "-x", "!0", "[1, 2]",
+        ] {
+            assert!(
+                build(&[("x", value)]).is_err(),
+                "value {value:?} should be rejected"
+            );
         }
         let negative = build(&[("neg", "-1")]).unwrap();
         assert!(negative.identifier("neg").unwrap().negative);
