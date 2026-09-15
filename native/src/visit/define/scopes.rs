@@ -72,8 +72,7 @@ impl<'a> Walker<'a> {
     pub(crate) fn binding_in_scope(&self, scope: u32, name: &str) -> Option<NameBinding> {
         // most define-active files declare no enums: skip the member lookup
         // (and its UTF-16 allocation) entirely
-        let enum_scopes = (!self.enum_members.is_empty())
-            .then(|| &self.const_bindings.enum_scopes);
+        let enum_scopes = (!self.enum_members.is_empty()).then(|| &self.const_bindings.enum_scopes);
         if let Some(scopes) = enum_scopes {
             let units: Vec<u16> = name.encode_utf16().collect();
             if let Some(group) = scopes.get(&scope)

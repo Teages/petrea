@@ -10,9 +10,9 @@ use oxc_ast::ast::*;
 use oxc_parser::Token;
 use oxc_span::{GetSpan, Span};
 
-use super::{class, enums, expression, function, namespace, pattern, statement};
 use self::flattener::flatten_program;
 use self::scopes::{FnvBuild, prepare_enum_tables};
+use super::{class, enums, expression, function, namespace, pattern, statement};
 
 mod flattener;
 mod scopes;
@@ -83,7 +83,8 @@ pub struct Walker<'a> {
     /// FNV-hashed: SipHash costs more than the few scope hops a memo hit
     /// saves, which is the same reason [`crate::visit::define`] keeps
     /// shallow chains out of the memo entirely.
-    pub(crate) binding_cache: std::collections::HashMap<(u32, &'a str), crate::visit::define::NameBinding, FnvBuild>,
+    pub(crate) binding_cache:
+        std::collections::HashMap<(u32, &'a str), crate::visit::define::NameBinding, FnvBuild>,
 }
 
 /// Iterator over the linked-list children of a node, in visit order.
@@ -524,8 +525,7 @@ impl<'a> Walker<'a> {
 
             // a member chain may match a dotted define; unmatched chains fall
             // through to the child walk, which retries the shorter suffixes
-            AstKind::StaticMemberExpression(_)
-            | AstKind::ComputedMemberExpression(_) => {
+            AstKind::StaticMemberExpression(_) | AstKind::ComputedMemberExpression(_) => {
                 if self.defines.is_some() && self.substitute_member_define(idx) {
                     VisitResult::Js
                 } else {

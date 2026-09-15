@@ -49,7 +49,9 @@ impl<'a> Walker<'a> {
         if self.try_jsx_member_tag_define(idx, name) {
             return;
         }
-        let Some(value) = defines.identifier(name) else { return };
+        let Some(value) = defines.identifier(name) else {
+            return;
+        };
         if self.define_blocked(idx, span, value)
             || self.define_shadowed(idx, name)
             // `with` intercepts identifier lookups only — `this` and
@@ -69,8 +71,7 @@ impl<'a> Walker<'a> {
         }
         // a decorator head takes a dotted identifier chain, optionally
         // called — anything else wraps the whole head in parentheses
-        if let Some((target, spliced)) = self.decorator_head_splice(idx, span, &text)
-        {
+        if let Some((target, spliced)) = self.decorator_head_splice(idx, span, &text) {
             self.blanker
                 .output
                 .override_range_sorted_padded(target.start, target.end, spliced);
@@ -102,8 +103,10 @@ impl<'a> Walker<'a> {
             // literal shorthand expands through the computed key, like
             // esbuild. Assignment-target shorthands have no such magic.
             let expansion = if name == "__proto__"
-                && matches!(self.node_kind(self.parent_of(idx)), AstKind::ObjectProperty(_))
-            {
+                && matches!(
+                    self.node_kind(self.parent_of(idx)),
+                    AstKind::ObjectProperty(_)
+                ) {
                 format!("[\"{name}\"]: {text}")
             } else {
                 format!("{name}: {text}")
@@ -182,7 +185,7 @@ impl<'a> Walker<'a> {
                     node = parent;
                 }
                 AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_) => {
-                    return Some((links, node))
+                    return Some((links, node));
                 }
                 _ => return None,
             }
@@ -197,7 +200,9 @@ impl<'a> Walker<'a> {
         outermost: u32,
         root: ChainRootRef<'_>,
     ) -> bool {
-        let Some(defines) = self.defines else { return false };
+        let Some(defines) = self.defines else {
+            return false;
+        };
         // longest prefix first
         for take in (1..=links.len()).rev() {
             let chain: Vec<&str> = links[..take]
@@ -224,8 +229,10 @@ impl<'a> Walker<'a> {
             let result_flips = whole_name
                 && !text.contains('.')
                 && text.starts_with(|c: char| c.is_ascii_lowercase());
-            if !matches!(value.root, Some(ChainRoot::Ident(_)) | Some(ChainRoot::This))
-                || value.text.contains('\\')
+            if !matches!(
+                value.root,
+                Some(ChainRoot::Ident(_)) | Some(ChainRoot::This)
+            ) || value.text.contains('\\')
                 || result_flips
             {
                 self.blanker.warn("define-jsx-tag", span);
@@ -260,7 +267,10 @@ impl<'a> Walker<'a> {
         // JSX lowering runs ahead of its this-nesting check; ordinary
         // expressions keep it
         if (tag.is_none() && self.this_is_nested(idx))
-            || self.blanker.output.overlaps_pushed_range(span.start, span.end)
+            || self
+                .blanker
+                .output
+                .overlaps_pushed_range(span.start, span.end)
         {
             return;
         }
@@ -272,8 +282,7 @@ impl<'a> Walker<'a> {
         // `this(...)` could never have been the identifier `eval`, so a bare
         // global `eval` value must splice as an indirect call
         let spliced = self.indirect_if_bare_eval(idx, value, spliced);
-        if let Some((target, text)) = self.decorator_head_splice(idx, span, &spliced)
-        {
+        if let Some((target, text)) = self.decorator_head_splice(idx, span, &spliced) {
             self.blanker
                 .output
                 .override_range_sorted_padded(target.start, target.end, text);
@@ -294,16 +303,21 @@ impl<'a> Walker<'a> {
     /// Substitute a bare `import.meta` against the `import.meta` define.
     pub(crate) fn substitute_import_meta_define(&mut self, idx: u32, span: Span) {
         let Some(defines) = self.defines else { return };
-        let Some(value) = defines.import_meta() else { return };
-        if self.blanker.output.overlaps_pushed_range(span.start, span.end) {
+        let Some(value) = defines.import_meta() else {
+            return;
+        };
+        if self
+            .blanker
+            .output
+            .overlaps_pushed_range(span.start, span.end)
+        {
             return;
         }
         let spliced = self.splice_text(idx, value, span);
         // as with `this(...)`: `import.meta(...)` was never the identifier
         // `eval`, so a bare global `eval` value stays an indirect call
         let spliced = self.indirect_if_bare_eval(idx, value, spliced);
-        if let Some((target, text)) = self.decorator_head_splice(idx, span, &spliced)
-        {
+        if let Some((target, text)) = self.decorator_head_splice(idx, span, &spliced) {
             self.blanker
                 .output
                 .override_range_sorted_padded(target.start, target.end, text);
@@ -326,7 +340,9 @@ impl<'a> Walker<'a> {
     /// then skip the subtree); false leaves the generic child walk in charge,
     /// which retries the shorter suffix chains and the chain's root.
     pub(crate) fn substitute_member_define(&mut self, idx: u32) -> bool {
-        let Some(defines) = self.defines else { return false };
+        let Some(defines) = self.defines else {
+            return false;
+        };
         // the outermost property decides candidacy up front: no key ends
         // with it means no chain to build (the common case for every member
         // expression in a define-active file)
@@ -341,7 +357,9 @@ impl<'a> Walker<'a> {
             }
             _ => return false,
         };
-        let Some(bucket) = defines.dotted_bucket(tail) else { return false };
+        let Some(bucket) = defines.dotted_bucket(tail) else {
+            return false;
+        };
         let limit = Defines::bucket_limit(bucket);
         // property names from the outermost member inward; transparent
         // wrappers between links are skipped, and the root must be a bare
@@ -393,7 +411,9 @@ impl<'a> Walker<'a> {
             ChainRootKind::This => ChainRootRef::This,
             ChainRootKind::ImportMeta => ChainRootRef::ImportMeta,
         };
-        let Some(value) = defines.dotted_in_bucket(bucket, &chain, root) else { return false };
+        let Some(value) = defines.dotted_in_bucket(bucket, &chain, root) else {
+            return false;
+        };
         // identifier roots resolve through the scope model; a `this` root
         // only exists at top level
         let root_blocked = match root_kind {
@@ -415,8 +435,7 @@ impl<'a> Walker<'a> {
         // it direct — evaluating in the enclosing scope instead of global
         let mut text = self.splice_text(idx, value, span);
         text = self.indirect_if_bare_eval(idx, value, text);
-        if let Some((target, spliced)) = self.decorator_head_splice(idx, span, &text)
-        {
+        if let Some((target, spliced)) = self.decorator_head_splice(idx, span, &text) {
             self.blanker
                 .output
                 .override_range_sorted_padded(target.start, target.end, spliced);
@@ -441,7 +460,9 @@ impl<'a> Walker<'a> {
         } else {
             text
         };
-        self.blanker.output.override_range_sorted_padded(span.start, span.end, text);
+        self.blanker
+            .output
+            .override_range_sorted_padded(span.start, span.end, text);
         true
     }
 
@@ -449,13 +470,7 @@ impl<'a> Walker<'a> {
     /// (`flag()` → `(0, obj.method)()`), claiming the parentheses around the
     /// reference when the whole wrapper chain is parens; non-detaching
     /// splices cover the reference's own span.
-    fn detached(
-        &mut self,
-        idx: u32,
-        span: Span,
-        dotted: bool,
-        text: String,
-    ) -> (String, Span) {
+    fn detached(&mut self, idx: u32, span: Span, dotted: bool, text: String) -> (String, Span) {
         let (top, only_parens) = self.unwrap_up(idx);
         let parent = self.parent_of(top);
         if parent == u32::MAX || !self.is_call_or_tag_callee(top, parent) {
@@ -471,7 +486,11 @@ impl<'a> Walker<'a> {
         let claimable = only_parens && top != idx;
         (
             format!("(0, {text})"),
-            if claimable { self.node_kind(top).span() } else { span },
+            if claimable {
+                self.node_kind(top).span()
+            } else {
+                span
+            },
         )
     }
 
@@ -492,12 +511,7 @@ impl<'a> Walker<'a> {
     /// spelling (an `eval`-valued identifier key stays a direct eval, as
     /// esbuild splices it), and a shadowed local `eval` value reads that
     /// binding — no hazard either way.
-    fn indirect_if_bare_eval(
-        &mut self,
-        idx: u32,
-        value: &DefineValue,
-        text: String,
-    ) -> String {
+    fn indirect_if_bare_eval(&mut self, idx: u32, value: &DefineValue, text: String) -> String {
         if !matches!(&value.root, Some(ChainRoot::Ident(root)) if root == "eval")
             || value.dotted
             || !matches!(self.name_binding(idx, "eval"), NameBinding::Global)
@@ -550,8 +564,7 @@ impl<'a> Walker<'a> {
     }
 
     fn preceded_by_minus(&self, span: Span) -> bool {
-        span.start > 0
-            && self.src.as_bytes().get(span.start as usize - 1) == Some(&b'-')
+        span.start > 0 && self.src.as_bytes().get(span.start as usize - 1) == Some(&b'-')
     }
 }
 

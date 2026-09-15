@@ -35,7 +35,10 @@ impl<'a> Walker<'a> {
         target: Span,
         text: &str,
     ) -> bool {
-        if !matches!(text.as_bytes().first(), Some(b'(' | b'[' | b'`' | b'+' | b'-')) {
+        if !matches!(
+            text.as_bytes().first(),
+            Some(b'(' | b'[' | b'`' | b'+' | b'-')
+        ) {
             return false;
         }
         // the splice is statement-initial when every ancestor up to the
@@ -215,8 +218,7 @@ impl<'a> Walker<'a> {
             // short-circuiting; `(void 0)?.#x` keeps it
             AstKind::PrivateFieldExpression(member) => member.object.span().start == start,
             AstKind::BinaryExpression(binary) => {
-                binary.operator == BinaryOperator::Exponential
-                    && binary.left.span().start == start
+                binary.operator == BinaryOperator::Exponential && binary.left.span().start == start
             }
             AstKind::NewExpression(new) => new.callee.span().start == start,
             // class heritage takes a LeftHandSideExpression: `extends void 0`
@@ -290,7 +292,7 @@ impl<'a> Walker<'a> {
                     top = self.parent_of(top);
                 }
                 AstKind::JSXOpeningElement(_) | AstKind::JSXClosingElement(_) => {
-                    return Some(member_root)
+                    return Some(member_root);
                 }
                 _ => return None,
             }
@@ -314,8 +316,10 @@ impl<'a> Walker<'a> {
         };
         // an escaped spelling (`\u0043omp`) cannot be spliced into a JSX
         // tag; `this` and `this.x` are the other valid tag spellings
-        if !matches!(value.root, Some(ChainRoot::Ident(_)) | Some(ChainRoot::This))
-            || text.contains('\\')
+        if !matches!(
+            value.root,
+            Some(ChainRoot::Ident(_)) | Some(ChainRoot::This)
+        ) || text.contains('\\')
         {
             return true;
         }
@@ -387,9 +391,7 @@ impl<'a> Walker<'a> {
             AstKind::UpdateExpression(_) => true,
             // `({ x } = y)` — the binding writes; the default `({ x = y } = z)`
             // reads
-            AstKind::AssignmentTargetPropertyIdentifier(node) => {
-                node.binding.span().start == start
-            }
+            AstKind::AssignmentTargetPropertyIdentifier(node) => node.binding.span().start == start,
             // array/object destructuring patterns and rests hold only write
             // positions; a default's initializer reads — `[x = y] = z`
             AstKind::ArrayAssignmentTarget(_)
@@ -398,9 +400,7 @@ impl<'a> Walker<'a> {
             AstKind::AssignmentTargetWithDefault(node) => node.binding.span().start == start,
             // `({ key: NODE_ENV } = o)`: the value side writes; a computed
             // key `({ [k]: x } = o)` is a read position
-            AstKind::AssignmentTargetPropertyProperty(node) => {
-                node.binding.span().start == start
-            }
+            AstKind::AssignmentTargetPropertyProperty(node) => node.binding.span().start == start,
             _ => false,
         }
     }
@@ -504,11 +504,10 @@ impl<'a> Walker<'a> {
 /// `import` roots spell like one but are not, so those values wrap. Later
 /// segments are property names, where keywords are fine (`a.class`).
 fn is_dotted_identifier_chain(text: &str) -> bool {
-    !text.is_empty()
-        && text.split('.').enumerate().all(|(i, part)| {
-            let mut chars = part.chars();
-            let head_ok = matches!(chars.next(), Some(c) if c.is_alphabetic() || c == '_' || c == '$')
-                && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$');
-            head_ok && (i > 0 || !matches!(part, "true" | "false" | "null" | "this" | "import"))
-        })
+    !text.is_empty() && text.split('.').enumerate().all(|(i, part)| {
+        let mut chars = part.chars();
+        let head_ok = matches!(chars.next(), Some(c) if c.is_alphabetic() || c == '_' || c == '$')
+            && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+        head_ok && (i > 0 || !matches!(part, "true" | "false" | "null" | "this" | "import"))
+    })
 }

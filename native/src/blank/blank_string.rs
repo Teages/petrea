@@ -127,10 +127,9 @@ impl BlankString {
         for &(flags, start, end, text_index) in ranges {
             if is_text(flags) {
                 let (len, units_len) = match &self.texts[text_index as usize] {
-                    SpliceText::Str(text) => (
-                        text.len(),
-                        text.chars().map(char::len_utf16).sum::<usize>(),
-                    ),
+                    SpliceText::Str(text) => {
+                        (text.len(), text.chars().map(char::len_utf16).sum::<usize>())
+                    }
                     // decoded UTF-8 bytes equal the unit count only after
                     // re-encoding; bound both from the unit side
                     SpliceText::Units(units) => (units.len(), units.len()),

@@ -113,8 +113,7 @@ pub(crate) fn flatten_program<'a>(
             gates,
             relevant: gate_relevant.unwrap_or_default(),
         }
-    }
-    else {
+    } else {
         let mut flattener = Flattener::<false>::default();
         flattener.visit_program(program);
         let Flattener::<false> {
@@ -199,9 +198,10 @@ impl<'a, const GATED: bool> Visit<'a> for Flattener<'a, GATED> {
                         | TSEnumMemberName::ComputedString(literal) => {
                             let value = literal.value.as_str();
                             starts_relevant(value, &self.gate_firsts)
-                                && self.gate_relevant.as_ref().is_some_and(|roots| {
-                                    roots.contains(&value)
-                                })
+                                && self
+                                    .gate_relevant
+                                    .as_ref()
+                                    .is_some_and(|roots| roots.contains(&value))
                         }
                         TSEnumMemberName::ComputedTemplateString(_) => true,
                     };

@@ -90,7 +90,9 @@ fn resolve_filename(options: Option<&TranspileNativeOptions>) -> String {
     })
 }
 
-fn resolve_defines(options: Option<TranspileNativeOptions>) -> Option<std::collections::HashMap<String, String>> {
+fn resolve_defines(
+    options: Option<TranspileNativeOptions>,
+) -> Option<std::collections::HashMap<String, String>> {
     options.and_then(|o| o.define)
 }
 
@@ -167,7 +169,11 @@ pub fn transpile_async(
 ) -> AsyncTask<TranspileTask> {
     let filename = resolve_filename(options.as_ref());
     let defines = resolve_defines(options);
-    AsyncTask::new(TranspileTask { input, filename, defines })
+    AsyncTask::new(TranspileTask {
+        input,
+        filename,
+        defines,
+    })
 }
 
 /// Synchronous counterpart of `transpile_async` (the JS `transpileSync` export).
@@ -178,7 +184,11 @@ pub fn transpile_native_sync(
 ) -> Result<TranspileNativeResult> {
     let filename = resolve_filename(options.as_ref());
     let defines = resolve_defines(options);
-    to_napi_result(transpile::transpile_caught(input, &filename, defines.as_ref()))
+    to_napi_result(transpile::transpile_caught(
+        input,
+        &filename,
+        defines.as_ref(),
+    ))
 }
 
 #[cfg(test)]
@@ -364,7 +374,11 @@ pub fn transpile_utf16_async(
     let filename = resolve_filename(options.as_ref());
     let defines = resolve_defines(options);
     let units = units.to_vec();
-    AsyncTask::new(TranspileUnitsTask { units, filename, defines })
+    AsyncTask::new(TranspileUnitsTask {
+        units,
+        filename,
+        defines,
+    })
 }
 
 /// Synchronous UTF-16 entry point (see [`transpile_utf16_async`]).
