@@ -48,21 +48,29 @@ describe('define', () => {
       expect(output.indexOf('+ tail')).toBe(input.indexOf('+ tail'))
     })
 
-    it('pads a multi-byte value to byte length on the byte path', () => {
-      // `λ` is 2 UTF-8 bytes but 1 UTF-16 unit: the String path pads to the
-      // span's byte length (Buffer counts bytes, String.length counts units)
+    it('pads a multi-byte value in UTF-16 units on both paths', () => {
+      // λ is 2 UTF-8 bytes but 1 UTF-16 unit: both the byte path and the
+      // BOM-routed path pad to 4 units (`λ` + 3 spaces), keeping the JS
+      // string positions — the byte path's output grows one byte in exchange
       const input = 'log(FLAG)'
+      const bomInput = `\uFEFF${input}`
       const output = transpile(input, { define: { FLAG: 'λ' } })
-      expect(output).toBe('log(λ  )')
-      expect(Buffer.byteLength(output, 'utf8')).toBe(Buffer.byteLength(input, 'utf8'))
+      expect(output).toBe('log(λ   )')
+      expect(output.length).toBe(input.length)
+      expect(Buffer.byteLength(output, 'utf8')).toBe(Buffer.byteLength(input, 'utf8') + 1)
+      const bomOutput = transpile(bomInput, { define: { FLAG: 'λ' } })
+      expect(bomOutput).toBe(`\uFEFF${output}`)
+      expect(bomOutput.length).toBe(bomInput.length)
     })
 
-    it('pads a multi-byte value to unit length on the UTF-16 path', () => {
-      // the same splice through the BOM-routed path pads to code units
-      const input = '\uFEFFlog(FLAG)'
-      const output = transpile(input, { define: { FLAG: 'λ' } })
-      expect(output).toBe('\uFEFFlog(λ   )')
+    it('pads a multi-byte span in UTF-16 units', () => {
+      // `变量` is 6 UTF-8 bytes but 2 units: one space of padding, not five,
+      // so the `)` keeps its column on the byte path
+      const input = 'log(变量)'
+      const output = transpile(input, { define: { 变量: '1' } })
+      expect(output).toBe('log(1 )')
       expect(output.length).toBe(input.length)
+      expect(output.indexOf(')')).toBe(input.indexOf(')'))
     })
 
     it('merges the numeric dot-separator with the padding', () => {

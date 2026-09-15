@@ -52,10 +52,10 @@ export interface TranspileOptions {
    * `{ __DEV__: 'true', 'process.env.NODE_ENV': '"production"' }`.
    * Purely textual: shadowed references and writes are left untouched.
    * A replacement shorter than the span it covers is padded with trailing
-   * spaces up to the span's length, so later columns on the same line keep
-   * their positions; a longer replacement still shifts them (a partial
-   * guarantee, matching the whitespace-padding philosophy of the erasure
-   * itself).
+   * spaces up to the span's length in UTF-16 code units (JavaScript string
+   * positions), so later columns on the same line keep their positions; a
+   * longer replacement still shifts them (a partial guarantee, matching
+   * the whitespace-padding philosophy of the erasure itself).
    */
   readonly define?: Readonly<Record<string, string>>
 }

@@ -4,9 +4,11 @@
 //! blanks like enum rewrites do. A splice shorter than the span it replaces
 //! is padded with trailing spaces to the span's length (see
 //! `BlankString::override_range_sorted_padded`), so later columns on the
-//! line hold; a longer splice still shifts them, and the shaping forms that
-//! lengthen the text (semicolon prefix, shorthand expansion, `(0, x)`
-//! decoupling, decorator whole-head wrap) simply never fall short.
+//! line hold — measured in UTF-16 code units, the unit of JavaScript string
+//! positions, on both output paths. A longer splice still shifts them, and
+//! the shaping forms that lengthen the text (semicolon prefix, shorthand
+//! expansion, `(0, x)` decoupling, decorator whole-head wrap) simply never
+//! fall short.
 //!
 //! Guards mirror esbuild's verified behavior: identifier references resolve
 //! through the enum pipeline's scope registry (a parameter, `var`, import,
