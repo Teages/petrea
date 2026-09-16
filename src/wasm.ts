@@ -9,7 +9,7 @@ import * as wasip1Loader from '@petrea/binding-wasm32-wasip1'
 
 import { createApi } from './api'
 
-export type { OnError, OnWarn, TranspileOptions, UnsupportedSyntax, Warning } from './types'
+export type { OnError, TranspileOptions, UnsupportedSyntax } from './types'
 
 function loadWasmBinding(): NativeBinding {
   return wasip1Loader as unknown as NativeBinding

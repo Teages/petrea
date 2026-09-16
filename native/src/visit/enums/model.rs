@@ -416,7 +416,7 @@ pub(super) fn member_name_of(w: &Walker<'_>, member: &TSEnumMember<'_>) -> Vec<u
 /// scope tree — except that a function's parameter environment wraps its
 /// defaults, its (expression-bodied) body and everything nested, while being
 /// a *sibling* of the braced body in the AST.
-pub(crate) fn scope_above(w: &Walker<'_>, idx: u32) -> u32 {
+pub(super) fn scope_above(w: &Walker<'_>, idx: u32) -> u32 {
     // leaving a parameter scope skips the function it belongs to
     let mut cursor = if matches!(w.node_kind(idx), AstKind::FormalParameters(_)) {
         w.parent_of(w.parent_of(idx))
