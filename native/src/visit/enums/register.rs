@@ -58,6 +58,10 @@ pub(super) fn register_enum_declaration<'a>(
         entry.names.insert(name.clone());
         member_names.push(name);
     }
+    // a `declare enum` binds like a runtime one in this registry: the emitter
+    // lets an initializer fold through its members, and a block-scoped
+    // ambient name still blocks an outer const from folding — pinned by the
+    // declare-enum cases in test/enum-scope.test.ts
     if !w.node_scope.is_empty() {
         // the member scope the declaration introduced: nested declarations
         // resolve bare names through these members
@@ -157,7 +161,9 @@ fn register_class_name<'a>(
     }
 }
 
-/// Imported names bind like any other non-constant.
+/// Imported names bind like any other non-constant. Type-only imports are
+/// erased — neither the whole `import type` declaration nor an inline
+/// `import { type X }` specifier binds its name.
 fn register_imports<'a>(
     w: &Walker<'a>,
     idx: u32,
@@ -165,11 +171,22 @@ fn register_imports<'a>(
     bindings: &mut ConstBindings<'a>,
 ) {
     for specifier in node.specifiers.iter().flatten() {
-        let local = match specifier {
-            ImportDeclarationSpecifier::ImportSpecifier(s) => &s.local,
-            ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => &s.local,
-            ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => &s.local,
+        let (local, type_only) = match specifier {
+            ImportDeclarationSpecifier::ImportSpecifier(s) => (
+                &s.local,
+                node.import_kind == ImportOrExportKind::Type
+                    || s.import_kind == ImportOrExportKind::Type,
+            ),
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                (&s.local, node.import_kind == ImportOrExportKind::Type)
+            }
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
+                (&s.local, node.import_kind == ImportOrExportKind::Type)
+            }
         };
+        if type_only {
+            continue;
+        }
         bind_shadow(bindings, w.node_scope(idx), local.name.as_str());
     }
 }
@@ -178,7 +195,10 @@ fn register_imports<'a>(
 /// annotation-free name with an initializer joins the fold candidates; every
 /// other bound name becomes a shadow marker. `let`/`const` bind in their
 /// enclosing scope (the loop-head scope for a for-head); `var` hoists to the
-/// innermost function-like container, including out of for heads.
+/// innermost function-like container, including out of for heads. Ambient
+/// (`declare`) variables bind like any other here: the emitter itself keeps a
+/// function-scoped ambient from folding an outer const, and on the invalid
+/// inputs where its behavior varies by scope no rule matches it everywhere.
 fn register_variable<'a>(
     w: &Walker<'a>,
     index: u32,
@@ -247,7 +267,12 @@ fn var_scope_of(w: &Walker<'_>, index: u32) -> u32 {
     let mut cursor = index;
     while cursor != u32::MAX {
         match w.node_kind(cursor) {
-            AstKind::Program(_) | AstKind::FunctionBody(_) | AstKind::StaticBlock(_) => {
+            AstKind::Program(_)
+            | AstKind::FunctionBody(_)
+            | AstKind::StaticBlock(_)
+            // a namespace body compiles to an IIFE — `var` inside it stays
+            // inside, never hoisting to the enclosing statements
+            | AstKind::TSModuleBlock(_) => {
                 return w.node_scope(cursor);
             }
             _ => {}
