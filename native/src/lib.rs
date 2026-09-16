@@ -11,6 +11,7 @@ macro_rules! node_index {
 }
 
 mod blank;
+mod replace;
 mod transpile;
 mod visit;
 
@@ -28,6 +29,22 @@ pub struct TranspileNativeOptions {
     /// Source path quoted in parse-failure diagnostics; its extension also
     /// selects the parse mode (a `.tsx` filename enables JSX).
     pub filename: Option<String>,
+    /// Plain-text replacement run before the pipeline parses; the JS
+    /// `replace` option (see `types.ts` for the semantics).
+    pub replace: Option<std::collections::HashMap<String, String>>,
+    /// Flags for `replace`; both default to false.
+    pub replace_options: Option<ReplaceNativeOptions>,
+}
+
+/// The `replaceOptions` flags.
+#[napi(object)]
+pub struct ReplaceNativeOptions {
+    /// Skip matches that look like an assignment (`KEY = x`, `KEY => x`) or
+    /// a declaration (`const|let|var KEY`).
+    pub prevent_assignment: Option<bool>,
+    /// Derive `typeof prefix` guard keys for legal member-chain dotted keys,
+    /// replacing them with the quoted literal `"object"`.
+    pub object_guards: Option<bool>,
 }
 
 /// A TypeScript-only construct with runtime semantics that was kept verbatim.
@@ -52,15 +69,49 @@ pub struct TranspileUnitsResult {
     pub unsupported: Vec<NativeUnsupported>,
 }
 
-fn resolve_filename(options: Option<&TranspileNativeOptions>) -> String {
-    let lang = options.and_then(|o| o.lang.as_deref());
-    options.and_then(|o| o.filename.clone()).unwrap_or_else(|| {
-        if lang == Some("tsx") {
+/// The boundary options split into the fields the pipeline consumes; each
+/// is moved out of the napi struct exactly once, so the replace entries
+/// cross without a whole-table copy.
+struct ResolvedOptions {
+    filename: String,
+    replace: Option<replace::ReplaceParams>,
+}
+
+/// Resolve [`ResolvedOptions`]: the report filename (the given `filename`,
+/// or a `lang`-derived fallback) and the replace params, both replace
+/// flags defaulting to false.
+fn resolve_options(options: Option<TranspileNativeOptions>) -> ResolvedOptions {
+    let Some(options) = options else {
+        return ResolvedOptions {
+            filename: "input.ts".to_string(),
+            replace: None,
+        };
+    };
+    let TranspileNativeOptions {
+        lang,
+        filename,
+        replace,
+        replace_options,
+    } = options;
+    let filename = filename.unwrap_or_else(|| {
+        if lang.as_deref() == Some("tsx") {
             "input.tsx".to_string()
         } else {
             "input.ts".to_string()
         }
-    })
+    });
+    let replace = replace.map(|entries| replace::ReplaceParams {
+        entries,
+        prevent_assignment: replace_options
+            .as_ref()
+            .and_then(|o| o.prevent_assignment)
+            .unwrap_or(false),
+        object_guards: replace_options
+            .as_ref()
+            .and_then(|o| o.object_guards)
+            .unwrap_or(false),
+    });
+    ResolvedOptions { filename, replace }
 }
 
 /// The API contract (`types.ts`) promises JS string indices (UTF-16 code
@@ -105,6 +156,7 @@ fn to_napi_result(
 pub struct TranspileTask {
     input: String,
     filename: String,
+    replace: Option<replace::ReplaceParams>,
 }
 
 impl Task for TranspileTask {
@@ -115,6 +167,7 @@ impl Task for TranspileTask {
         to_napi_result(transpile::transpile_caught(
             std::mem::take(&mut self.input),
             &self.filename,
+            self.replace.take(),
         ))
     }
 
@@ -130,8 +183,12 @@ pub fn transpile_async(
     input: String,
     options: Option<TranspileNativeOptions>,
 ) -> AsyncTask<TranspileTask> {
-    let filename = resolve_filename(options.as_ref());
-    AsyncTask::new(TranspileTask { input, filename })
+    let options = resolve_options(options);
+    AsyncTask::new(TranspileTask {
+        input,
+        filename: options.filename,
+        replace: options.replace,
+    })
 }
 
 /// Synchronous counterpart of `transpile_async` (the JS `transpileSync` export).
@@ -140,8 +197,12 @@ pub fn transpile_native_sync(
     input: String,
     options: Option<TranspileNativeOptions>,
 ) -> Result<TranspileNativeResult> {
-    let filename = resolve_filename(options.as_ref());
-    to_napi_result(transpile::transpile_caught(input, &filename))
+    let options = resolve_options(options);
+    to_napi_result(transpile::transpile_caught(
+        input,
+        &options.filename,
+        options.replace,
+    ))
 }
 
 #[cfg(test)]
@@ -289,7 +350,7 @@ mod perf_bench {
         // the clone stands in for the JS-string → Rust-String copy the napi
         // boundary always performs, so the in-place output path is measured
         let output =
-            crate::transpile::transpile(input.to_string(), "input.ts").expect("transpiles");
+            crate::transpile::transpile(input.to_string(), "input.ts", None).expect("transpiles");
         std::hint::black_box(output.code.len() + output.unsupported.len())
     }
 }
@@ -297,6 +358,7 @@ mod perf_bench {
 pub struct TranspileUnitsTask {
     units: Vec<u16>,
     filename: String,
+    replace: Option<replace::ReplaceParams>,
 }
 
 impl Task for TranspileUnitsTask {
@@ -307,6 +369,7 @@ impl Task for TranspileUnitsTask {
         to_napi_units_result(transpile::transpile_units_caught(
             std::mem::take(&mut self.units),
             &self.filename,
+            self.replace.take(),
         ))
     }
 
@@ -322,9 +385,13 @@ pub fn transpile_utf16_async(
     units: Uint16Array,
     options: Option<TranspileNativeOptions>,
 ) -> AsyncTask<TranspileUnitsTask> {
-    let filename = resolve_filename(options.as_ref());
+    let options = resolve_options(options);
     let units = units.to_vec();
-    AsyncTask::new(TranspileUnitsTask { units, filename })
+    AsyncTask::new(TranspileUnitsTask {
+        units,
+        filename: options.filename,
+        replace: options.replace,
+    })
 }
 
 /// Synchronous UTF-16 entry point (see [`transpile_utf16_async`]).
@@ -333,7 +400,11 @@ pub fn transpile_utf16_sync(
     units: Uint16Array,
     options: Option<TranspileNativeOptions>,
 ) -> Result<TranspileUnitsResult> {
-    let filename = resolve_filename(options.as_ref());
+    let options = resolve_options(options);
     // one copy into an owned buffer — the output side reuses it in place
-    to_napi_units_result(transpile::transpile_units_caught(units.to_vec(), &filename))
+    to_napi_units_result(transpile::transpile_units_caught(
+        units.to_vec(),
+        &options.filename,
+        options.replace,
+    ))
 }
