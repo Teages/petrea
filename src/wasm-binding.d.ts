@@ -14,6 +14,8 @@ declare module '@petrea/binding-wasm32-wasip1' {
       preventAssignment?: boolean
       objectGuards?: boolean
     }
+    /** Blank statically-dead branches; see `TranspileOptions.dce`. */
+    dce?: boolean
   }
 
   export interface NativeResult {

@@ -12,6 +12,8 @@ export interface NativeOptions {
     preventAssignment?: boolean
     objectGuards?: boolean
   }
+  /** Blank statically-dead branches; see `TranspileOptions.dce`. */
+  dce?: boolean
 }
 
 export interface NativeUnsupported {
@@ -78,6 +80,7 @@ function toNativeOptions(options: TranspileOptions): NativeOptions {
     replace: options.replace
       && Object.fromEntries(Object.entries(options.replace).map(([key, value]) => [key, String(value)])),
     replaceOptions: options.replaceOptions,
+    dce: options.dce,
   }
 }
 

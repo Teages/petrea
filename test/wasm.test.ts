@@ -18,7 +18,10 @@ if (!existsSync(wasmLoaderPath)) {
 }
 
 interface WasmBinding {
-  transpileNativeSync: (input: string, options?: object) => { code: string }
+  transpileNativeSync: (input: string, options?: object) => {
+    code: string
+    unsupported: Array<{ nodeType: string, start: number, end: number }>
+  }
   transpileUtf16Sync: (units: Uint16Array, options?: object) => { code: Uint16Array }
 }
 
@@ -85,5 +88,26 @@ describe('wasm binding', () => {
       const wasmOutput = binding.transpileNativeSync(input, options).code
       expect(wasmOutput, `wasm output for ${file}`).toBe(transpileSync(input, options))
     }
+  })
+
+  it('hollows a dead block through dce like the platform binary', () => {
+    expect(binding.transpileNativeSync('if (false) { a() }', { dce: true }).code)
+      .toBe('if (false) {     }')
+    expect(transpileSync('if (false) { a() }', { dce: true })).toBe('if (false) {     }')
+  })
+
+  it('reports a dce guard on the wasm build like the platform binary', () => {
+    const input = 'if (false) { var x }'
+    const wasmResult = binding.transpileNativeSync(input, { dce: true })
+    expect(wasmResult.unsupported.map(node => node.nodeType)).toContain('dce-hoisted')
+    const reports: Array<{ type: string }> = []
+    transpileSync(input, { dce: true, onError: node => reports.push(node) })
+    expect(reports.map(node => node.type)).toContain('dce-hoisted')
+  })
+
+  it('hollows through the UTF-16 entry with dce on', () => {
+    const input = '\uFEFFif (false) { a() }'
+    const { code } = binding.transpileUtf16Sync(toUnits(input), { dce: true })
+    expect(String.fromCharCode(...code)).toBe('\uFEFFif (false) {     }')
   })
 })

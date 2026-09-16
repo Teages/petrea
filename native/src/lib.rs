@@ -34,6 +34,8 @@ pub struct TranspileNativeOptions {
     pub replace: Option<std::collections::HashMap<String, String>>,
     /// Flags for `replace`; both default to false.
     pub replace_options: Option<ReplaceNativeOptions>,
+    /// Blank statically-dead branches in place; the JS `dce` option.
+    pub dce: Option<bool>,
 }
 
 /// The `replaceOptions` flags.
@@ -75,6 +77,7 @@ pub struct TranspileUnitsResult {
 struct ResolvedOptions {
     filename: String,
     replace: Option<replace::ReplaceParams>,
+    dce: bool,
 }
 
 /// Resolve [`ResolvedOptions`]: the report filename (the given `filename`,
@@ -85,6 +88,7 @@ fn resolve_options(options: Option<TranspileNativeOptions>) -> ResolvedOptions {
         return ResolvedOptions {
             filename: "input.ts".to_string(),
             replace: None,
+            dce: false,
         };
     };
     let TranspileNativeOptions {
@@ -92,6 +96,7 @@ fn resolve_options(options: Option<TranspileNativeOptions>) -> ResolvedOptions {
         filename,
         replace,
         replace_options,
+        dce,
     } = options;
     let filename = filename.unwrap_or_else(|| {
         if lang.as_deref() == Some("tsx") {
@@ -111,7 +116,11 @@ fn resolve_options(options: Option<TranspileNativeOptions>) -> ResolvedOptions {
             .and_then(|o| o.object_guards)
             .unwrap_or(false),
     });
-    ResolvedOptions { filename, replace }
+    ResolvedOptions {
+        filename,
+        replace,
+        dce: dce.unwrap_or(false),
+    }
 }
 
 /// The API contract (`types.ts`) promises JS string indices (UTF-16 code
@@ -157,6 +166,7 @@ pub struct TranspileTask {
     input: String,
     filename: String,
     replace: Option<replace::ReplaceParams>,
+    dce: bool,
 }
 
 impl Task for TranspileTask {
@@ -168,6 +178,7 @@ impl Task for TranspileTask {
             std::mem::take(&mut self.input),
             &self.filename,
             self.replace.take(),
+            self.dce,
         ))
     }
 
@@ -188,6 +199,7 @@ pub fn transpile_async(
         input,
         filename: options.filename,
         replace: options.replace,
+        dce: options.dce,
     })
 }
 
@@ -202,6 +214,7 @@ pub fn transpile_native_sync(
         input,
         &options.filename,
         options.replace,
+        options.dce,
     ))
 }
 
@@ -349,8 +362,8 @@ mod perf_bench {
     fn transpile_for_bench(input: &str) -> usize {
         // the clone stands in for the JS-string → Rust-String copy the napi
         // boundary always performs, so the in-place output path is measured
-        let output =
-            crate::transpile::transpile(input.to_string(), "input.ts", None).expect("transpiles");
+        let output = crate::transpile::transpile(input.to_string(), "input.ts", None, false)
+            .expect("transpiles");
         std::hint::black_box(output.code.len() + output.unsupported.len())
     }
 }
@@ -359,6 +372,7 @@ pub struct TranspileUnitsTask {
     units: Vec<u16>,
     filename: String,
     replace: Option<replace::ReplaceParams>,
+    dce: bool,
 }
 
 impl Task for TranspileUnitsTask {
@@ -370,6 +384,7 @@ impl Task for TranspileUnitsTask {
             std::mem::take(&mut self.units),
             &self.filename,
             self.replace.take(),
+            self.dce,
         ))
     }
 
@@ -391,6 +406,7 @@ pub fn transpile_utf16_async(
         units,
         filename: options.filename,
         replace: options.replace,
+        dce: options.dce,
     })
 }
 
@@ -406,5 +422,6 @@ pub fn transpile_utf16_sync(
         units.to_vec(),
         &options.filename,
         options.replace,
+        options.dce,
     ))
 }

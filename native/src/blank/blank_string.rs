@@ -3,6 +3,11 @@ const REPLACE_WITH_OPEN_PAREN: u8 = 1;
 const REPLACE_WITH_CLOSE_PAREN: u8 = 2;
 const REPLACE_WITH_SEMI: u8 = 3;
 const REPLACE_WITH_TEXT: u8 = 4;
+/// Modifier bit OR-ed onto [`REPLACE_WITH_BLANK`]/[`REPLACE_WITH_SEMI`]:
+/// the blank also keeps U+2028/U+2029 as line breaks. The dce hollow sets
+/// it — its edits reach plain JavaScript no earlier pass rewrote, so its
+/// position promise must hold for all four JavaScript line terminators.
+const KEEP_LINE_BREAKS: u8 = 0b1000_0000;
 
 /// An override text: kept as the string it came from on the String path,
 /// and encoded only for the lossless UTF-16 path — a Rust `String` can
@@ -85,6 +90,20 @@ impl BlankString {
         self.ranges.push((REPLACE_WITH_BLANK, start, end, u32::MAX));
     }
 
+    /// [`blank`](Self::blank) keeping U+2028/U+2029 as line breaks too —
+    /// see [`KEEP_LINE_BREAKS`].
+    pub fn blank_keep_line_breaks(&mut self, start: u32, end: u32) {
+        self.ranges
+            .push((REPLACE_WITH_BLANK | KEEP_LINE_BREAKS, start, end, u32::MAX));
+    }
+
+    /// [`blank_but_start_with_semi`](Self::blank_but_start_with_semi)
+    /// keeping U+2028/U+2029 as line breaks too — see [`KEEP_LINE_BREAKS`].
+    pub fn blank_but_start_with_semi_keep_line_breaks(&mut self, start: u32, end: u32) {
+        self.ranges
+            .push((REPLACE_WITH_SEMI | KEEP_LINE_BREAKS, start, end, u32::MAX));
+    }
+
     /// Splice into one exactly-sized buffer; the capacity for text overrides
     /// is computed up front so the whole output is a single allocation.
     pub fn build(&self, input: &str) -> String {
@@ -107,7 +126,9 @@ impl BlankString {
         let mut out = Vec::with_capacity(input.len() + extra);
         let mut previous_end = 0u32;
 
-        for &(flags, start, end, text_index) in ranges {
+        for &(raw_flags, start, end, text_index) in ranges {
+            let keep_line_breaks = raw_flags & KEEP_LINE_BREAKS != 0;
+            let flags = raw_flags & !KEEP_LINE_BREAKS;
             let range_start = start.max(previous_end);
             out.extend_from_slice(&input.as_bytes()[previous_end as usize..range_start as usize]);
 
@@ -138,7 +159,7 @@ impl BlankString {
 
             previous_end = end;
             if flags != REPLACE_WITH_TEXT {
-                write_space(&mut out, input, range_start, previous_end);
+                write_space(&mut out, input, range_start, previous_end, keep_line_breaks);
             }
         }
 
@@ -157,7 +178,8 @@ impl BlankString {
     pub fn build_owned(self, input: String) -> String {
         let bytes = input.as_bytes();
         let mut covered_end = 0u32;
-        let in_place = self.ranges.iter().all(|&(flags, start, end, _)| {
+        let in_place = self.ranges.iter().all(|&(raw_flags, start, end, _)| {
+            let flags = raw_flags & !KEEP_LINE_BREAKS;
             let ok = flags != REPLACE_WITH_TEXT
                 && start >= covered_end
                 && (flags == REPLACE_WITH_BLANK || end > start)
@@ -170,7 +192,8 @@ impl BlankString {
         }
 
         let mut buffer = input.into_bytes();
-        for &(flags, start, end, _) in &self.ranges {
+        for &(raw_flags, start, end, _) in &self.ranges {
+            let flags = raw_flags & !KEEP_LINE_BREAKS;
             let mut at = start as usize;
             if flags != REPLACE_WITH_BLANK {
                 buffer[at] = match flags {
@@ -180,6 +203,8 @@ impl BlankString {
                 };
                 at += 1;
             }
+            // in-place ranges are ASCII (the eligibility check), so CR/LF
+            // are the only line breaks that can appear here
             for b in &mut buffer[at..end as usize] {
                 if *b != b'\n' && *b != b'\r' {
                     *b = b' ';
@@ -193,8 +218,9 @@ impl BlankString {
 
 /// Preserve newlines inside [start, end); everything else becomes one space
 /// per UTF-16 code unit (a non-BMP char becomes 2). Ranges pushed out of
-/// source order write nothing.
-fn write_space(out: &mut Vec<u8>, input: &str, start: u32, end: u32) {
+/// source order write nothing. `keep_line_breaks` additionally preserves
+/// U+2028/U+2029, whose 3 UTF-8 bytes replace their own width.
+fn write_space(out: &mut Vec<u8>, input: &str, start: u32, end: u32, keep_line_breaks: bool) {
     if start >= end {
         return;
     }
@@ -209,6 +235,10 @@ fn write_space(out: &mut Vec<u8>, input: &str, start: u32, end: u32) {
         match c {
             '\n' => out.push(b'\n'),
             '\r' => out.push(b'\r'),
+            '\u{2028}' | '\u{2029}' if keep_line_breaks => {
+                let mut encoded = [0u8; 3];
+                out.extend_from_slice(c.encode_utf8(&mut encoded).as_bytes());
+            }
             _ => {
                 for _ in 0..c.len_utf16() {
                     out.push(b' ');
@@ -246,7 +276,9 @@ impl BlankString {
         let mut previous_end = 0u32;
         let mut previous_unit = 0usize;
 
-        for &(flags, start, end, text_index) in &self.ranges {
+        for &(raw_flags, start, end, text_index) in &self.ranges {
+            let keep_line_breaks = raw_flags & KEEP_LINE_BREAKS != 0;
+            let flags = raw_flags & !KEEP_LINE_BREAKS;
             let range_start = start.max(previous_end);
             let range_unit = unit_at(range_start);
             out.extend_from_slice(&units[previous_unit..range_unit]);
@@ -278,6 +310,7 @@ impl BlankString {
                 for &unit in &units[range_unit..end_unit] {
                     out.push(match unit {
                         0x0A | 0x0D => unit,
+                        0x2028 | 0x2029 if keep_line_breaks => unit,
                         _ => 0x20,
                     });
                 }
@@ -296,7 +329,8 @@ impl BlankString {
     /// ranges, mirroring [`build_owned`](Self::build_owned).
     pub fn build_units_owned(self, units: Vec<u16>, byte_to_unit: &[u32]) -> Vec<u16> {
         let mut covered_end = 0u32;
-        let in_place = self.ranges.iter().all(|&(flags, start, end, _)| {
+        let in_place = self.ranges.iter().all(|&(raw_flags, start, end, _)| {
+            let flags = raw_flags & !KEEP_LINE_BREAKS;
             let ok = flags != REPLACE_WITH_TEXT
                 && start >= covered_end
                 && (flags == REPLACE_WITH_BLANK || end > start);
@@ -309,7 +343,9 @@ impl BlankString {
 
         let unit_at = |pos: u32| byte_to_unit.partition_point(|&b| b < pos);
         let mut buffer = units;
-        for &(flags, start, end, _) in &self.ranges {
+        for &(raw_flags, start, end, _) in &self.ranges {
+            let keep_line_breaks = raw_flags & KEEP_LINE_BREAKS != 0;
+            let flags = raw_flags & !KEEP_LINE_BREAKS;
             let mut at = unit_at(start);
             if flags != REPLACE_WITH_BLANK {
                 buffer[at] = match flags {
@@ -320,7 +356,9 @@ impl BlankString {
                 at += 1;
             }
             for unit in &mut buffer[at..unit_at(end)] {
-                if *unit != 0x0A && *unit != 0x0D {
+                let line_break = matches!(*unit, 0x0A | 0x0D)
+                    || (keep_line_breaks && matches!(*unit, 0x2028 | 0x2029));
+                if !line_break {
                     *unit = 0x20;
                 }
             }
