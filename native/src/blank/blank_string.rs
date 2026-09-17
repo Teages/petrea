@@ -3,14 +3,6 @@ const REPLACE_WITH_OPEN_PAREN: u8 = 1;
 const REPLACE_WITH_CLOSE_PAREN: u8 = 2;
 const REPLACE_WITH_SEMI: u8 = 3;
 const REPLACE_WITH_TEXT: u8 = 4;
-const REPLACE_WITH_PADDED_TEXT: u8 = 5;
-
-/// Whether the flags carry a text splice ([`REPLACE_WITH_TEXT`] or the
-/// define-only padded flavor): both write caller text over the range and
-/// share the text-length bookkeeping in the build paths.
-const fn is_text(flags: u8) -> bool {
-    matches!(flags, REPLACE_WITH_TEXT | REPLACE_WITH_PADDED_TEXT)
-}
 
 /// An override text: kept as the string it came from on the String path,
 /// and encoded only for the lossless UTF-16 path — a Rust `String` can
@@ -63,28 +55,6 @@ impl BlankString {
             .insert(at, (REPLACE_WITH_TEXT, start, end, index));
     }
 
-    /// [`override_range_sorted`](Self::override_range_sorted) for the define
-    /// splices: a replacement shorter than the span it covers is padded with
-    /// trailing spaces up to the span's length, so text after the splice on
-    /// the same line keeps its column — the same whitespace-padding
-    /// philosophy as TS erasure. A longer replacement still runs long; the
-    /// guarantee is partial by design. Both build paths measure in UTF-16
-    /// code units — the unit of JavaScript string positions and of
-    /// `write_space`'s blanks — so a multi-byte value
-    /// or span pads identically whichever path renders it (the byte path's
-    /// output may then grow in bytes; its unit columns hold). A trailing
-    /// space the caller already appended (the numeric dot-separator) counts
-    /// toward the length, merging with the padding into one run.
-    pub fn override_range_sorted_padded(&mut self, start: u32, end: u32, text: String) {
-        let index = self.texts.len() as u32;
-        self.texts.push(SpliceText::Str(text));
-        let at = self
-            .ranges
-            .partition_point(|&(_, range_start, _, _)| range_start <= start);
-        self.ranges
-            .insert(at, (REPLACE_WITH_PADDED_TEXT, start, end, index));
-    }
-
     /// Whether [start, end) overlaps an already-pushed range: an identifier
     /// inside an erased region (a type alias, an annotation) must not be
     /// rewritten — splicing text into erased content corrupts the output.
@@ -125,23 +95,12 @@ impl BlankString {
 
         let mut extra = 0usize;
         for &(flags, start, end, text_index) in ranges {
-            if is_text(flags) {
-                let (len, units_len) = match &self.texts[text_index as usize] {
-                    SpliceText::Str(text) => {
-                        (text.len(), text.chars().map(char::len_utf16).sum::<usize>())
-                    }
-                    // decoded UTF-8 bytes equal the unit count only after
-                    // re-encoding; bound both from the unit side
-                    SpliceText::Units(units) => (units.len(), units.len()),
+            if flags == REPLACE_WITH_TEXT {
+                let len = match &self.texts[text_index as usize] {
+                    SpliceText::Str(text) => text.len(),
+                    SpliceText::Units(units) => units.len(),
                 };
-                if flags == REPLACE_WITH_PADDED_TEXT {
-                    // unit-based padding: `text + deficit spaces` in bytes is
-                    // bounded by units + span units minus the span's bytes
-                    extra += (len + span_units(input, start, end) as usize)
-                        .saturating_sub(units_len + (end - start) as usize);
-                } else {
-                    extra += len.saturating_sub((end - start) as usize);
-                }
+                extra += len.saturating_sub((end - start) as usize);
             }
         }
 
@@ -154,26 +113,14 @@ impl BlankString {
 
             let mut range_start = range_start;
             match flags {
-                REPLACE_WITH_TEXT | REPLACE_WITH_PADDED_TEXT => {
-                    let text_units = match &self.texts[text_index as usize] {
-                        SpliceText::Str(text) => {
-                            out.extend_from_slice(text.as_bytes());
-                            text.chars().map(char::len_utf16).sum::<usize>() as u32
-                        }
-                        SpliceText::Units(units) => {
-                            let decoded = String::from_utf16(units)
-                                .expect("String-path texts are valid UTF-16");
-                            let units_len = units.len() as u32;
-                            out.extend_from_slice(decoded.as_bytes());
-                            units_len
-                        }
-                    };
-                    if flags == REPLACE_WITH_PADDED_TEXT {
-                        let deficit =
-                            span_units(input, range_start, end).saturating_sub(text_units);
-                        out.resize(out.len() + deficit as usize, b' ');
-                    }
-                }
+                REPLACE_WITH_TEXT => match &self.texts[text_index as usize] {
+                    SpliceText::Str(text) => out.extend_from_slice(text.as_bytes()),
+                    SpliceText::Units(units) => out.extend_from_slice(
+                        String::from_utf16(units)
+                            .expect("String-path texts are valid UTF-16")
+                            .as_bytes(),
+                    ),
+                },
                 REPLACE_WITH_CLOSE_PAREN => {
                     out.push(b')');
                     range_start += 1;
@@ -190,7 +137,7 @@ impl BlankString {
             }
 
             previous_end = end;
-            if !is_text(flags) {
+            if flags != REPLACE_WITH_TEXT {
                 write_space(&mut out, input, range_start, previous_end);
             }
         }
@@ -211,7 +158,7 @@ impl BlankString {
         let bytes = input.as_bytes();
         let mut covered_end = 0u32;
         let in_place = self.ranges.iter().all(|&(flags, start, end, _)| {
-            let ok = !is_text(flags)
+            let ok = flags != REPLACE_WITH_TEXT
                 && start >= covered_end
                 && (flags == REPLACE_WITH_BLANK || end > start)
                 && bytes[start as usize..end as usize].is_ascii();
@@ -242,20 +189,6 @@ impl BlankString {
         // only ASCII bytes were written over valid UTF-8; validity survives
         String::from_utf8(buffer).expect("in-place writes are ASCII-only")
     }
-}
-
-/// UTF-16 code units of the input slice [start, end): the length unit of
-/// JavaScript string positions, and thus of the define padding on both
-/// build paths — a multi-byte value or span pads to the columns a JS
-/// consumer observes, like `write_space` blanks one space per unit.
-fn span_units(input: &str, start: u32, end: u32) -> u32 {
-    if start >= end {
-        return 0;
-    }
-    input[start as usize..end as usize]
-        .chars()
-        .map(char::len_utf16)
-        .sum::<usize>() as u32
 }
 
 /// Preserve newlines inside [start, end); everything else becomes one space
@@ -298,7 +231,7 @@ impl BlankString {
 
         let mut extra = 0usize;
         for &(flags, start, end, text_index) in &self.ranges {
-            if is_text(flags) {
+            if flags == REPLACE_WITH_TEXT {
                 let len = match &self.texts[text_index as usize] {
                     SpliceText::Str(text) => text.chars().map(char::len_utf16).sum(),
                     SpliceText::Units(units) => units.len(),
@@ -320,25 +253,10 @@ impl BlankString {
 
             let mut range_unit = range_unit;
             match flags {
-                REPLACE_WITH_TEXT | REPLACE_WITH_PADDED_TEXT => {
-                    let text_units = match &self.texts[text_index as usize] {
-                        SpliceText::Str(text) => {
-                            out.extend(text.encode_utf16());
-                            text.chars().map(char::len_utf16).sum::<usize>()
-                        }
-                        SpliceText::Units(units) => {
-                            out.extend_from_slice(units);
-                            units.len()
-                        }
-                    };
-                    if flags == REPLACE_WITH_PADDED_TEXT {
-                        let end_unit = unit_at(end);
-                        let deficit = end_unit
-                            .saturating_sub(range_unit)
-                            .saturating_sub(text_units);
-                        out.resize(out.len() + deficit, 0x20);
-                    }
-                }
+                REPLACE_WITH_TEXT => match &self.texts[text_index as usize] {
+                    SpliceText::Str(text) => out.extend(text.encode_utf16()),
+                    SpliceText::Units(units) => out.extend_from_slice(units),
+                },
                 REPLACE_WITH_CLOSE_PAREN => {
                     out.push(0x29);
                     range_unit += 1;
@@ -355,7 +273,7 @@ impl BlankString {
             }
 
             previous_end = end;
-            if !is_text(flags) {
+            if flags != REPLACE_WITH_TEXT {
                 let end_unit = unit_at(previous_end);
                 for &unit in &units[range_unit..end_unit] {
                     out.push(match unit {
@@ -379,7 +297,7 @@ impl BlankString {
     pub fn build_units_owned(self, units: Vec<u16>, byte_to_unit: &[u32]) -> Vec<u16> {
         let mut covered_end = 0u32;
         let in_place = self.ranges.iter().all(|&(flags, start, end, _)| {
-            let ok = !is_text(flags)
+            let ok = flags != REPLACE_WITH_TEXT
                 && start >= covered_end
                 && (flags == REPLACE_WITH_BLANK || end > start);
             covered_end = covered_end.max(end);
@@ -511,96 +429,5 @@ mod tests {
         bs.blank(3, 7);
         let slow = bs.build_units(&units, &byte_to_unit);
         assert_eq!(bs.build_units_owned(units, &byte_to_unit), slow);
-    }
-
-    #[test]
-    fn padded_text_shorter_than_span_fills_to_length() {
-        // both paths pad in UTF-16 code units; on ASCII spans (the common
-        // define case) units are bytes, so the byte path pads 8 spaces here
-        let input = "const mode = process.env.NODE_ENV;";
-        let mut bs = BlankString::default();
-        bs.override_range_sorted_padded(13, 33, "\"production\"".to_string());
-        let out = bs.build(input);
-        assert_eq!(out.len(), input.len());
-        assert_eq!(out, "const mode = \"production\"        ;");
-    }
-
-    #[test]
-    fn padded_text_longer_than_span_stays_long() {
-        let input = "log(a)";
-        let mut bs = BlankString::default();
-        bs.override_range_sorted_padded(4, 5, "someRatherLongValue".to_string());
-        assert_eq!(bs.build(input), "log(someRatherLongValue)");
-    }
-
-    #[test]
-    fn padded_text_counts_a_trailing_guard_space_toward_the_length() {
-        // splice_text appends the numeric dot-separator before the splice is
-        // pushed; the padding merges with it instead of stacking another run
-        let input = "log(foo.NODE_ENV.x)";
-        let mut bs = BlankString::default();
-        bs.override_range_sorted_padded(4, 16, "42 ".to_string());
-        assert_eq!(bs.build(input), "log(42          .x)");
-    }
-
-    #[test]
-    fn padded_text_measures_in_utf16_units_on_both_paths() {
-        // λ is 2 UTF-8 bytes but 1 UTF-16 unit: both paths pad to 4 units
-        // (`λ` + 3 spaces), keeping the JS-visible column of `)`. The byte
-        // path's output grows by one byte in exchange.
-        let input = "log(FLAG)";
-        let mut bs = BlankString::default();
-        bs.override_range_sorted_padded(4, 8, "λ".to_string());
-        assert_eq!(bs.build(input), "log(λ   )");
-        assert_eq!(bs.build(input).len(), 10); // bytes: 4 + 2 + 3 pad + 1
-        assert_eq!(bs.build(input).chars().count(), input.chars().count());
-
-        let units: Vec<u16> = "log(FLAG)".encode_utf16().collect();
-        let byte_to_unit: Vec<u32> = (0..=units.len() as u32).collect();
-        let mut bs = BlankString::default();
-        bs.override_range_sorted_padded(4, 8, "λ".to_string());
-        let expected: Vec<u16> = "log(λ   )".encode_utf16().collect();
-        assert_eq!(bs.build_units(&units, &byte_to_unit), expected);
-    }
-
-    #[test]
-    fn padded_text_measures_a_multibyte_span_in_utf16_units() {
-        // `变量` is 6 UTF-8 bytes but 2 units: the byte path pads 1 space,
-        // not 5 — the `)` keeps its JS-visible column
-        let input = "log(变量)";
-        let mut bs = BlankString::default();
-        bs.override_range_sorted_padded(4, 10, "1".to_string());
-        assert_eq!(bs.build(input), "log(1 )");
-        assert_eq!(bs.build(input).chars().count(), input.chars().count());
-    }
-
-    #[test]
-    fn padded_text_survives_lone_surrogate_neighbors_on_the_units_path() {
-        // units after a raw lone surrogate keep their byte offsets shifted
-        // by its 3-byte lossy encoding; the padding still counts units
-        let mut units: Vec<u16> = "log(FLAG)".encode_utf16().collect();
-        units.push(0xD800); // raw lone surrogate
-        units.push(b'x' as u16);
-        // byte_to_unit of the lossy parse copy: identity through "log(FLAG)"
-        // (9 units), the surrogate starts at byte 9, 'x' at 12, sentinel 13
-        let byte_to_unit: Vec<u32> = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13];
-        let mut bs = BlankString::default();
-        bs.override_range_sorted_padded(4, 8, "1".to_string());
-        let out = bs.build_units(&units, &byte_to_unit);
-        assert_eq!(out.len(), units.len());
-        assert_eq!(out[8], 0x29); // ')'
-        assert_eq!(out[9], 0xD800); // the lone surrogate round-trips
-        assert_eq!(out[10], b'x' as u16);
-    }
-
-    #[test]
-    fn build_owned_falls_back_on_padded_text() {
-        let input = "const mode = process.env.NODE_ENV;";
-        let make = || {
-            let mut bs = BlankString::default();
-            bs.override_range_sorted_padded(13, 33, "\"production\"".to_string());
-            bs
-        };
-        assert_eq!(make().build(input), make().build_owned(input.to_string()));
     }
 }

@@ -61,3 +61,43 @@ describe('enum initializer scope boundaries', () => {
     expect(evaluate(transpile(input)), 'native enum expansion').toBe(expected)
   })
 })
+
+// Whole-file companions to the initializer cases above: the binding that
+// decides whether `B = A` folds needs declarations petrea erases or keeps
+// around the reference. The fold decision is textual, so each case pins the
+// emitted member value directly against an explicit expectation (checked
+// against tsc first) — runtime evaluation alone cannot tell `B = 5` from a
+// verbatim `B = A` that reads 5 at runtime. The three shadow cases would fail
+// on v0.4.2's registry; the four preservation cases pin emitter-parity or
+// v0.4.2 behavior that later registry work must not lose — including the
+// deliberate ones: an ambient enum and a function-scoped ambient variable
+// both keep blocking folds, because on the invalid inputs where the emitter
+// varies by scope no rule matches it everywhere.
+const foldDecisionCases = [
+  ['type-only import does not shadow the const', 'const A = 5; import type { A } from "./x"; enum E { B = A }', '5'],
+  ['inline type specifier does not shadow the const', 'const A = 5; import { type A } from "./x"; enum E { B = A }', '5'],
+  ['namespace var stops at the namespace body', 'const V = 5; namespace N { export var V = 9 } enum E { B = V }', '5'],
+  ['declare enum member still folds', 'declare enum D { X = 9 } enum E { B = D.X }', '9'],
+  ['block-scoped declare enum name blocks the fold', 'const A = 5; { declare enum A { X } enum E { B = A } }', 'A'],
+  ['function-scoped ambient variable blocks the fold', 'const A = 5; function f() { declare var A; enum E { B = A } return E.B }', 'A'],
+  ['import-equals does not shadow the const', 'const A = 5; import A = require("./x"); enum E { B = A }', '5'],
+] as const
+
+function enumMemberValue(code: string): string {
+  const match = code.match(/E\[E\["B"\] = ([^\]]+)\]/)
+  expect(match, 'emitted enum member').toBeTruthy()
+  return match[1]
+}
+
+function tscReference(input: string): string {
+  return ts.transpileModule(input, {
+    compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.None },
+  }).outputText
+}
+
+describe('erased and surviving declarations in enum resolution', () => {
+  it.each(foldDecisionCases)('%s', (_label, input, expected) => {
+    expect(enumMemberValue(tscReference(input)), 'TypeScript reference').toBe(expected)
+    expect(enumMemberValue(transpile(input)), 'native enum expansion').toBe(expected)
+  })
+})
