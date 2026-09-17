@@ -65,7 +65,7 @@ jobs:
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             artifact: binding.win32-arm64-msvc.node
-          # WebAssembly for the @petrea/binding-wasm32-wasip1 package;
+          # WebAssembly for the @petrea/wasm package;
           # smoke-tested in Node through the generated .wasip1.cjs loader
           - target: wasm32-wasip1
             os: ubuntu-24.04
@@ -144,7 +144,7 @@ jobs:
           node scripts/smoke-native.mjs dist/${{ matrix.artifact }}
       - if: matrix.smoke == 'wasm'
         name: Smoke test (wasm binding in Node)
-        run: node scripts/smoke-native.mjs npm/wasm32-wasip1/binding.wasip1.cjs
+        run: node scripts/smoke-native.mjs npm/wasm/binding.wasip1.cjs
       - if: ${{ !matrix.wasm }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -155,7 +155,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binding-${{ matrix.target }}
-          path: npm/wasm32-wasip1/binding.*
+          path: npm/wasm/binding.*
           if-no-files-found: error
 
   # the win32-arm64 binary is cross-compiled on an x64 runner; load it on

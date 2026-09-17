@@ -1,9 +1,9 @@
-// Ambient types for the @petrea/binding-wasm32-wasip1 loader, whose real
+// Ambient types for the @petrea/wasm loader, whose real
 // declaration file (binding.wasip1.d.cts) only resolves once that package is
 // installed. Declaring the shape here keeps `pnpm test:types` green in the
 // repo, where the package exists as a workspace link whose generated types
 // land only after `pnpm build:wasm`.
-declare module '@petrea/binding-wasm32-wasip1' {
+declare module '@petrea/wasm' {
   export interface NativeOptions {
     lang?: string
     filename?: string

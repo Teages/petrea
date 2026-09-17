@@ -11,10 +11,10 @@ native/target
 /target
 
 # generated binding packages: the CI-only native dirs under npm/, and the
-# wasm artifacts inside the tracked @petrea/binding-wasm32-wasip1 manifest dir
+# wasm artifacts inside the tracked @petrea/wasm manifest dir
 npm/*
-!npm/wasm32-wasip1
-npm/wasm32-wasip1/binding.*
+!npm/wasm
+npm/wasm/binding.*
 
 # build staging
 wasm

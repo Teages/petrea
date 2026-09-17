@@ -15,9 +15,9 @@ export default defineBuildConfig({
         // the default `node` platform pulls node builtins into the bundle,
         // which browsers cannot load
         platform: 'browser',
-        // the wasm binding ships as a separate package; keep the bare import
-        // so consumers resolve it (and its wasm asset) from node_modules
-        external: ['@petrea/binding-wasm32-wasip1'],
+        // the wasm binding ships as the @petrea/wasm package; keep the bare
+        // import so consumers resolve it (and its wasm asset) from node_modules
+        external: ['@petrea/wasm'],
       },
     },
   ],

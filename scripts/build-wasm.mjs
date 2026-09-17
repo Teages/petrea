@@ -1,7 +1,7 @@
 import { execSync } from 'node:child_process'
 // Builds the Rust binding for wasm32-wasip1 into the `wasm/` staging dir and
-// copies the binding.* artifacts into the `@petrea/binding-wasm32-wasip1`
-// package dir (`npm/wasm32-wasip1`; the checked-in manifest makes it a
+// copies the binding.* artifacts into the @petrea/wasm package dir
+// (`npm/wasm`; the checked-in manifest makes it a
 // workspace package so local builds resolve). napi must never write into the
 // package dir directly: its output reconciliation deletes files it does not
 // manage, including package.json. Release CI copies the same files from the
@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const staging = join(root, 'wasm')
-const pkgDir = join(root, 'npm/wasm32-wasip1')
+const pkgDir = join(root, 'npm/wasm')
 
 rmSync(staging, { recursive: true, force: true })
 mkdirSync(staging, { recursive: true })
