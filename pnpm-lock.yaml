@@ -194,7 +194,7 @@ importers:
         specifier: npm:typescript@^7.0.2
         version: typescript@7.0.2
       '@vitest/coverage-v8':
-        specifier: ^5.0.0
+        specifier: ^5.0.1
         version: 5.0.1(vitest@5.0.1)
       emnapi:
         specifier: 2.0.0-alpha.5
@@ -227,7 +227,7 @@ importers:
         specifier: npm:@typescript/typescript6@^6.0.2
         version: '@typescript/typescript6@6.0.2'
       vitest:
-        specifier: ^5.0.0
+        specifier: ^5.0.1
         version: 5.0.1(@types/node@24.13.5)(@vitest/coverage-v8@5.0.1)
 
   npm/wasm32-wasip1:
