@@ -5,6 +5,13 @@ export type { OnError, TranspileOptions, UnsupportedSyntax } from './types'
 export interface NativeOptions {
   lang?: string
   filename?: string
+  /** Plain-text replacement; see `TranspileOptions.replace`. */
+  replace?: Record<string, string>
+  /** Flags for `replace`; see `TranspileOptions.replaceOptions`. */
+  replaceOptions?: {
+    preventAssignment?: boolean
+    objectGuards?: boolean
+  }
 }
 
 export interface NativeUnsupported {
@@ -67,6 +74,10 @@ function toNativeOptions(options: TranspileOptions): NativeOptions {
   return {
     lang: options.lang,
     filename: options.filename,
+    // the native table is text-only: numbers enter as their string spelling
+    replace: options.replace
+      && Object.fromEntries(Object.entries(options.replace).map(([key, value]) => [key, String(value)])),
+    replaceOptions: options.replaceOptions,
   }
 }
 

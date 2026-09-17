@@ -7,6 +7,13 @@ declare module '@petrea/binding-wasm32-wasip1' {
   export interface NativeOptions {
     lang?: string
     filename?: string
+    /** Plain-text replacement; see `TranspileOptions.replace`. */
+    replace?: Record<string, string>
+    /** Flags for `replace`; see `TranspileOptions.replaceOptions`. */
+    replaceOptions?: {
+      preventAssignment?: boolean
+      objectGuards?: boolean
+    }
   }
 
   export interface NativeResult {

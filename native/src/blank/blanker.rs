@@ -5,7 +5,7 @@ use super::blank_string::BlankString;
 use super::trivia::TokenIndex;
 
 /// A TypeScript-only construct with runtime semantics; positions are byte offsets.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsupportedSyntax {
     pub node_type: &'static str,
     pub start: u32,
