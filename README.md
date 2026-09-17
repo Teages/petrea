@@ -8,6 +8,8 @@ A small, fast type-stripper that blanks TypeScript-only syntax using the [oxc pa
 npm install petrea
 ```
 
+For browsers or platforms without a native binding, also install `@petrea/wasm` and import from `petrea/wasm`.
+
 ## Getting Started
 
 ```ts
