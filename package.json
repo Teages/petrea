@@ -86,6 +86,14 @@
       "aarch64-pc-windows-msvc"
     ]
   },
+  "peerDependencies": {
+    "@petrea/wasm": "workspace:*"
+  },
+  "peerDependenciesMeta": {
+    "@petrea/wasm": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@antfu/eslint-config": "^9.0.0",
     "@emnapi/core": "2.0.0-alpha.5",
