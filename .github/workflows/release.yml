@@ -140,7 +140,10 @@ jobs:
               echo "Skipping ${pkg_name}@${pkg_version} (already published)"
               return 0
             fi
-            pnpm stage publish --provenance --access public --tag "$NPM_TAG"
+            # the tree is intentionally dirty here: prepare-packages assembles
+            # the manifests and the lockfile resync rewrites pnpm-lock.yaml,
+            # so pnpm's publish git checks must stay off
+            pnpm stage publish --provenance --access public --tag "$NPM_TAG" --no-git-checks
           }
           for pkg in npm/*/; do
             if [ -f "$pkg/package.json" ]; then
@@ -157,5 +160,6 @@ jobs:
             exit 0
           fi
           # packing runs prepack, which builds dist/ from src/; the binding
-          # packages ride along through optionalDependencies
-          pnpm stage publish --provenance --access public --tag "$NPM_TAG"
+          # packages ride along through optionalDependencies. Same dirty-tree
+          # rationale as the bindings step: --no-git-checks or bust
+          pnpm stage publish --provenance --access public --tag "$NPM_TAG" --no-git-checks
