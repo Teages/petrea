@@ -54,4 +54,6 @@ export interface TranspileOptions {
     /** Also replace `typeof` prefixes of dotted keys (`a.b.c` → `typeof a`, `typeof a.b`) with `"object"`. */
     readonly objectGuards?: boolean
   }
+  /** Blank statically-dead `if`/`while`/`for` branches in place. */
+  readonly dce?: boolean
 }

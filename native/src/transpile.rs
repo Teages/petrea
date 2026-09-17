@@ -136,6 +136,7 @@ pub fn transpile(
     input: String,
     filename: &str,
     replace: Option<ReplaceParams>,
+    dce: bool,
 ) -> Result<TranspileOutput, String> {
     let allocator_guard = allocator_pool().get();
     let allocator: &Allocator = &allocator_guard;
@@ -174,7 +175,7 @@ pub fn transpile(
     };
 
     let source: &str = rewritten.as_deref().unwrap_or(input.as_str());
-    let (output, unsupported) = blank_program(&parse.program, source, &parse.tokens);
+    let (output, unsupported) = blank_program(&parse.program, source, &parse.tokens, dce);
     // the report offsets are converted while the source the edits were built
     // against is still alive (the replaced text when replace ran)
     let unsupported = unsupported
@@ -248,6 +249,7 @@ pub fn transpile_units(
     units: Vec<u16>,
     filename: &str,
     replace: Option<ReplaceParams>,
+    dce: bool,
 ) -> Result<TranspileUnitsOutput, String> {
     let allocator_guard = allocator_pool().get();
     let allocator: &Allocator = &allocator_guard;
@@ -294,6 +296,7 @@ pub fn transpile_units(
         parse_copy.as_str(),
         &byte_to_unit,
         &parse.tokens[..],
+        dce,
     );
 
     let unit_at = |pos: u32| byte_to_unit.partition_point(|&b| b < pos) as u32;
@@ -319,9 +322,10 @@ pub fn transpile_units_caught(
     units: Vec<u16>,
     filename: &str,
     replace: Option<ReplaceParams>,
+    dce: bool,
 ) -> Result<TranspileUnitsOutput, String> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        transpile_units(units, filename, replace)
+        transpile_units(units, filename, replace, dce)
     })) {
         Ok(result) => result,
         Err(payload) => {
@@ -346,9 +350,10 @@ pub fn transpile_caught(
     input: String,
     filename: &str,
     replace: Option<ReplaceParams>,
+    dce: bool,
 ) -> Result<TranspileOutput, String> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        transpile(input, filename, replace)
+        transpile(input, filename, replace, dce)
     })) {
         Ok(result) => result,
         Err(payload) => {
@@ -378,6 +383,7 @@ mod tests {
             "class C { private f2/**/!/**/: string; }".to_string(),
             "input.ts",
             None,
+            false,
         )
         .unwrap();
         assert_eq!(output.code, "class C {         f2/**/ /**/        ; }");
@@ -389,12 +395,13 @@ mod tests {
             "class C { constructor(private a: string) {} }".to_string(),
             "input.ts",
             None,
+            false,
         )
         .unwrap();
         assert_eq!(output.unsupported.len(), 1);
         assert_eq!(output.unsupported[0].node_type, "TSParameterProperty");
 
-        assert!(transpile("1 + 1 as T / 2;".to_string(), "input.ts", None).is_err());
+        assert!(transpile("1 + 1 as T / 2;".to_string(), "input.ts", None, false).is_err());
     }
 
     #[test]
@@ -402,7 +409,7 @@ mod tests {
         // a file with no enum expansions or grouping-constant text splices
         // blanks in place: output length equals input length, positions intact
         let input = "const a: number = 1;\nlet b = a as string;\ntype T = typeof a;\n";
-        let output = transpile(input.to_string(), "input.ts", None).unwrap();
+        let output = transpile(input.to_string(), "input.ts", None, false).unwrap();
         assert_eq!(output.code.len(), input.len());
         assert_eq!(output.code.lines().count(), input.lines().count());
     }
@@ -424,12 +431,17 @@ mod tests {
             "const mode = MODE;".to_string(),
             "input.ts",
             replace_params(&[("MODE", "x")]),
+            false,
         )
         .unwrap();
         assert_eq!(output.code, "const mode = x;");
 
-        let Err(error) = transpile("1".to_string(), "input.ts", replace_params(&[("", "1")]))
-        else {
+        let Err(error) = transpile(
+            "1".to_string(),
+            "input.ts",
+            replace_params(&[("", "1")]),
+            false,
+        ) else {
             panic!("empty replace keys must be rejected");
         };
         assert!(
@@ -441,9 +453,14 @@ mod tests {
     #[test]
     fn replace_with_zero_hits_matches_the_replace_free_transpile_byte_for_byte() {
         let input = "const a: number = KEY;\nenum E { A = FLAG }\nlet b = a as KEY;";
-        let armed =
-            transpile(input.to_string(), "input.ts", replace_params(&[("X", "1")])).unwrap();
-        let plain = transpile(input.to_string(), "input.ts", None).unwrap();
+        let armed = transpile(
+            input.to_string(),
+            "input.ts",
+            replace_params(&[("X", "1")]),
+            false,
+        )
+        .unwrap();
+        let plain = transpile(input.to_string(), "input.ts", None, false).unwrap();
         assert_eq!(armed.code, plain.code);
         assert_eq!(armed.unsupported, plain.unsupported);
     }
@@ -456,6 +473,7 @@ mod tests {
             "const x = @VALUE@;".to_string(),
             "input.ts",
             replace_params(&[("@VALUE@", "'1'")]),
+            false,
         )
         .unwrap();
         assert_eq!(output.code, "const x = '1';");
@@ -466,6 +484,7 @@ mod tests {
             "const x = @VALUE@;".to_string(),
             "input.ts",
             replace_params(&[("ABSENT", "1")]),
+            false,
         ) else {
             panic!("the unparseable original with no hits must fail");
         };
@@ -483,6 +502,7 @@ mod tests {
             "FLAG;".to_string(),
             "input.ts",
             replace_params(&[("FLAG", "return")]),
+            false,
         ) else {
             panic!("a replaced top-level return must fail loudly");
         };
@@ -494,11 +514,12 @@ mod tests {
         // the same recovered shape the user wrote themselves still
         // transpiles under the ordinary wide gate
         let input = "return;\nlog(1);";
-        let plain = transpile(input.to_string(), "input.ts", None).unwrap();
+        let plain = transpile(input.to_string(), "input.ts", None, false).unwrap();
         let armed = transpile(
             input.to_string(),
             "input.ts",
             replace_params(&[("ABSENT", "1")]),
+            false,
         )
         .unwrap();
         assert_eq!(plain.code, armed.code);
@@ -511,6 +532,7 @@ mod tests {
             "const a: T = KEY;".to_string(),
             "input.ts",
             replace_params(&[("KEY", "1")]),
+            false,
         )
         .unwrap();
         assert_eq!(output.code, "const a    = 1;");
@@ -519,6 +541,7 @@ mod tests {
             "type T = KEY;".to_string(),
             "input.ts",
             replace_params(&[("KEY", "1")]),
+            false,
         )
         .unwrap();
         assert_eq!(output.code, "           ");
@@ -533,6 +556,7 @@ mod tests {
             "let x: T = 1;".to_string(),
             "input.ts",
             replace_params(&[("T =", "U =")]),
+            false,
         )
         .unwrap();
         assert_eq!(output.code, "let x    = 1;");
@@ -541,6 +565,7 @@ mod tests {
             "let x: T = 1;".to_string(),
             "input.ts",
             replace_params(&[("T =", ")")]),
+            false,
         ) else {
             panic!("invalid replaced syntax must fail loudly");
         };
@@ -560,6 +585,7 @@ mod tests {
             units.clone(),
             "input.js",
             replace_params(&[("\u{FFFD}", "X")]),
+            false,
         )
         .unwrap();
         assert_eq!(output.code, units);
@@ -572,6 +598,7 @@ mod tests {
             units.clone(),
             "input.js",
             replace_params(&[("\u{FFFD}", "X")]),
+            false,
         )
         .unwrap();
         units[7] = b'X' as u16;
@@ -581,8 +608,13 @@ mod tests {
     #[test]
     fn replace_applies_inside_kept_verbatim_unsupported_constructs() {
         let source = "namespace N { export const x = KEY; }".to_string();
-        let output =
-            transpile(source.clone(), "input.ts", replace_params(&[("KEY", "1")])).unwrap();
+        let output = transpile(
+            source.clone(),
+            "input.ts",
+            replace_params(&[("KEY", "1")]),
+            false,
+        )
+        .unwrap();
         assert_eq!(output.code, "namespace N { export const x = 1; }");
         assert_eq!(output.unsupported.len(), 1);
     }
@@ -593,6 +625,7 @@ mod tests {
             "const s = \"FLAG\";".to_string(),
             "input.ts",
             replace_params(&[("FLAG", "1")]),
+            false,
         )
         .unwrap();
         assert_eq!(output.code, "const s = \"1\";");
@@ -601,6 +634,7 @@ mod tests {
             "const r = /FLAG/;".to_string(),
             "input.ts",
             replace_params(&[("FLAG", "1")]),
+            false,
         )
         .unwrap();
         assert_eq!(output.code, "const r = /1/;");
@@ -609,6 +643,7 @@ mod tests {
             "const t = `FLAG`;".to_string(),
             "input.ts",
             replace_params(&[("FLAG", "1")]),
+            false,
         )
         .unwrap();
         assert_eq!(output.code, "const t = `1`;");
@@ -617,6 +652,7 @@ mod tests {
             "const t = `${FLAG}`;".to_string(),
             "input.ts",
             replace_params(&[("FLAG", "1")]),
+            false,
         )
         .unwrap();
         assert_eq!(output.code, "const t = `${1}`;");
@@ -625,6 +661,7 @@ mod tests {
             "/* FLAG */".to_string(),
             "input.ts",
             replace_params(&[("FLAG", "1")]),
+            false,
         )
         .unwrap();
         assert_eq!(output.code, "/* 1 */");
@@ -636,6 +673,7 @@ mod tests {
             "enum E { A }\nlog(E);".to_string(),
             "input.ts",
             replace_params(&[("E", "F")]),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -647,6 +685,7 @@ mod tests {
             "enum E { A }\nlog(E.A);".to_string(),
             "input.ts",
             replace_params(&[("A", "B")]),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -661,6 +700,7 @@ mod tests {
             "enum E { A }\nif (E) { yes(); }".to_string(),
             "input.ts",
             replace_params(&[("E", "0")]),
+            false,
         ) else {
             panic!("`enum 0` must fail the reparse loudly");
         };
@@ -674,6 +714,7 @@ mod tests {
             "enum E { A }\nif (E) { yes(); }".to_string(),
             "input.ts",
             replace_params(&[("E", "F")]),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -688,6 +729,7 @@ mod tests {
             "const n = 1;\nenum E { A = n }".to_string(),
             "input.ts",
             replace_params(&[("1", "2")]),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -699,6 +741,7 @@ mod tests {
             "enum E { A = 1, B = A + f() }".to_string(),
             "input.ts",
             replace_params(&[("A", "X")]),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -710,6 +753,7 @@ mod tests {
             "enum E { A = \"KEY\" }".to_string(),
             "input.ts",
             replace_params(&[("KEY", "1")]),
+            false,
         )
         .unwrap();
         assert_eq!(

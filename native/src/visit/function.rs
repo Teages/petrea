@@ -124,6 +124,8 @@ fn visit_function_parts<'a>(
 }
 
 fn visit_body<'a>(w: &mut Walker<'a>, body: Option<&BodyRef<'a>>) {
+    // the dce top-level-await guard reads this depth
+    w.function_depth += 1;
     match body {
         Some(BodyRef::Block(fb)) => {
             // directives are prepended to the statement list
@@ -141,6 +143,7 @@ fn visit_body<'a>(w: &mut Walker<'a>, body: Option<&BodyRef<'a>>) {
         }
         None => {}
     }
+    w.function_depth -= 1;
 }
 
 /// Erase a `<T>` span; when it spans lines before the parameter list, start

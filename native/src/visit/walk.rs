@@ -12,7 +12,7 @@ use oxc_parser::Token;
 use oxc_span::{GetSpan, Span};
 use oxc_syntax::node::NodeId;
 
-use super::{class, enums, expression, function, namespace, pattern, statement};
+use super::{class, dce, enums, expression, function, namespace, pattern, statement};
 use crate::blank::blank_string::BlankString;
 use crate::blank::blanker::{Blanker, UnsupportedSyntax};
 /// `Js`: JavaScript was (or may have been) emitted; `Blanked`: fully erased,
@@ -297,6 +297,17 @@ pub struct Walker<'a> {
     scratch_pool: Vec<Vec<u32>>,
     /// Statement currently being walked, used by the `as`/`satisfies` rule.
     pub(crate) parent_statement: Option<u32>,
+    /// Whether DCE hollowing is on; off arms fall through to the default walk.
+    pub(crate) dce: bool,
+    /// Remaining guard-sweep node visits for this transpile; zero means
+    /// exhausted — candidates refuse without sweeping (see the dce module
+    /// docs).
+    pub(crate) guard_budget: u32,
+    /// Whether the one-shot `dce-budget` report already fired.
+    pub(crate) guard_budget_reported: bool,
+    /// Nesting depth of function bodies — the dce top-level-await guard
+    /// reads it to tell module-top-level awaits from function-level ones.
+    pub(crate) function_depth: u32,
     /// Members, constants and string values of every expanded enum, keyed by
     /// (statement-list serial, enum name) — TypeScript merges same-name
     /// declarations only within one scope. Frozen after the collection
@@ -363,6 +374,7 @@ pub fn blank_program<'a>(
     program: &Program<'a>,
     src: &'a str,
     tokens: &'a [Token],
+    dce: bool,
 ) -> (BlankString, Vec<UnsupportedSyntax>) {
     let mut flattener = Flattener::default();
     flattener.visit_program(program);
@@ -378,6 +390,10 @@ pub fn blank_program<'a>(
         next_sibling: flattener.next_sibling,
         scratch_pool: Vec::new(),
         parent_statement: None,
+        dce,
+        guard_budget: dce::GUARD_SCAN_BUDGET,
+        guard_budget_reported: false,
+        function_depth: 0,
         enum_members: Rc::new(HashMap::new()),
         const_bindings: Rc::new(enums::model::ConstBindings {
             bindings: HashMap::new(),
@@ -409,11 +425,12 @@ pub fn blank_program<'a>(
 /// handed to the parser, `byte_to_unit` maps copy byte offsets to original
 /// unit indices. The output is in original code units — lone surrogates survive.
 pub fn blank_program_utf16<'a>(
-    program: &'a Program<'a>,
+    program: &Program<'a>,
     units: &'a [u16],
     parse_copy: &'a str,
     byte_to_unit: &'a [u32],
     tokens: &'a [Token],
+    dce: bool,
 ) -> (BlankString, Vec<UnsupportedSyntax>) {
     let mut flattener = Flattener::default();
     flattener.visit_program(program);
@@ -429,6 +446,10 @@ pub fn blank_program_utf16<'a>(
         next_sibling: flattener.next_sibling,
         scratch_pool: Vec::new(),
         parent_statement: None,
+        dce,
+        guard_budget: dce::GUARD_SCAN_BUDGET,
+        guard_budget_reported: false,
+        function_depth: 0,
         enum_members: Rc::new(HashMap::new()),
         const_bindings: Rc::new(enums::model::ConstBindings {
             bindings: HashMap::new(),
@@ -887,6 +908,38 @@ impl<'a> Walker<'a> {
                 }
                 let body = node_index!(n.body);
                 self.visit_nested(body)
+            }
+
+            // DCE decisions sit ahead of the default walk; off, unfolded or
+            // refused falls through to the original children walk
+            AstKind::IfStatement(n) => {
+                if self.dce
+                    && let Some(result) = dce::visit_if_statement(self, n)
+                {
+                    result
+                } else {
+                    self.visit_children(idx)
+                }
+            }
+
+            AstKind::WhileStatement(n) => {
+                if self.dce
+                    && let Some(result) = dce::visit_while_statement(self, n)
+                {
+                    result
+                } else {
+                    self.visit_children(idx)
+                }
+            }
+
+            AstKind::ForStatement(n) => {
+                if self.dce
+                    && let Some(result) = dce::visit_for_statement(self, n)
+                {
+                    result
+                } else {
+                    self.visit_children(idx)
+                }
             }
 
             _ => self.visit_children(idx),

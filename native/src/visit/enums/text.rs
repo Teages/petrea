@@ -42,7 +42,7 @@ impl<'a> SourceText<'a> {
 
 /// Decoded UTF-16 value of a string literal, from the original code units on
 /// the UTF-16 path — the lossy parse copy would corrupt raw lone surrogates.
-pub(super) fn string_literal_value_units(
+pub(crate) fn string_literal_value_units(
     source: &SourceText<'_>,
     literal: &StringLiteral<'_>,
 ) -> Vec<u16> {

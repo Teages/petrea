@@ -1,6 +1,7 @@
 //! Per-construct visitors, dispatched from [`visit::walk`](self::walk).
 
 pub mod class;
+pub mod dce;
 pub mod enums;
 pub mod expression;
 pub mod function;
