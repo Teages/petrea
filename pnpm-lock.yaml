@@ -181,9 +181,9 @@ importers:
       '@napi-rs/wasm-runtime':
         specifier: ^1.2.3
         version: 1.2.4(@emnapi/core@2.0.0-alpha.5)(@emnapi/runtime@2.0.0-alpha.5)
-      '@petrea/binding-wasm32-wasip1':
+      '@petrea/wasm':
         specifier: workspace:*
-        version: link:npm/wasm32-wasip1
+        version: link:npm/wasm
       '@tybys/wasm-util':
         specifier: ^0.10.3
         version: 0.10.4
@@ -233,7 +233,7 @@ importers:
         specifier: ^5.0.1
         version: 5.0.1(@types/node@24.13.5)(@vitest/coverage-v8@5.0.1)(vite@8.3.0(@types/node@24.13.5)(jiti@2.7.0)(yaml@2.9.1))
 
-  npm/wasm32-wasip1:
+  npm/wasm:
     dependencies:
       '@emnapi/core':
         specifier: 2.0.0-alpha.5

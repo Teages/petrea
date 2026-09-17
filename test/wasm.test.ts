@@ -1,5 +1,5 @@
 // Behavioral checks for the wasm build of the Rust pipeline, loaded through
-// the Node-side wasm loader shipped in @petrea/binding-wasm32-wasip1. The
+// the Node-side wasm loader shipped in @petrea/wasm. The
 // wasm entry (dist/wasm.mjs) imports the same package's ESM loader,
 // but that fetches over HTTP, so it is exercised separately through a fetch
 // shim (browser-entry.test.ts).
@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest'
 import { transpileSync } from '../src/index'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const wasmLoaderPath = join(root, 'npm/wasm32-wasip1/binding.wasip1.cjs')
+const wasmLoaderPath = join(root, 'npm/wasm/binding.wasip1.cjs')
 
 if (!existsSync(wasmLoaderPath)) {
   throw new Error('the wasm binding is missing; run `pnpm build` first')

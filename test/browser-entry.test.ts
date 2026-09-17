@@ -1,10 +1,10 @@
 // Verifies the WebAssembly build at both of its layers:
 //
 // 1. dist/wasm.mjs — the published `petrea/wasm` entry. Node resolves its
-//    bare `@petrea/binding-wasm32-wasip1` import through the package's
+//    bare `@petrea/wasm` import through the package's
 //    `default` export condition (the CJS loader), so this layer proves the
 //    wrapper and the dependency wiring, not the browser loading path itself.
-// 2. npm/wasm32-wasip1/binding.wasip1-browser.js — the ESM loader bundlers
+// 2. npm/wasm/binding.wasip1-browser.js — the ESM loader bundlers
 //    select via the `browser` export condition. It instantiates the wasm
 //    module at import time through `globalThis.fetch`, which cannot read
 //    file: URLs, so the test installs a fetch shim that serves local files.
@@ -17,7 +17,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const browserEntryPath = join(root, 'dist/wasm.mjs')
-const browserLoaderPath = join(root, 'npm/wasm32-wasip1/binding.wasip1-browser.js')
+const browserLoaderPath = join(root, 'npm/wasm/binding.wasip1-browser.js')
 
 if (!existsSync(browserEntryPath)) {
   throw new Error('the browser entry is missing; run `pnpm build` first')

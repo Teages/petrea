@@ -125,7 +125,7 @@ export function createApi(load: () => NativeBinding | undefined): {
   function requireBinding(): NativeBinding {
     if (!binding) {
       throw new Error(
-        'petrea: no usable transpiler binding for this runtime. Run `pnpm build` first, or import `petrea/wasm` in browser environments.',
+        'petrea: no usable transpiler binding for this runtime. Run `pnpm build` first, or install `@petrea/wasm` and import `petrea/wasm`.',
         { cause: loadError },
       )
     }

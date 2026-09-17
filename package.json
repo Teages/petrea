@@ -86,13 +86,21 @@
       "aarch64-pc-windows-msvc"
     ]
   },
+  "peerDependencies": {
+    "@petrea/wasm": "workspace:*"
+  },
+  "peerDependenciesMeta": {
+    "@petrea/wasm": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@antfu/eslint-config": "^9.0.0",
     "@emnapi/core": "2.0.0-alpha.5",
     "@emnapi/runtime": "2.0.0-alpha.5",
     "@napi-rs/cli": "^3.9.0",
     "@napi-rs/wasm-runtime": "^1.2.3",
-    "@petrea/binding-wasm32-wasip1": "workspace:*",
+    "@petrea/wasm": "workspace:*",
     "@tybys/wasm-util": "^0.10.3",
     "@types/node": "^24.12.4",
     "@typescript/native": "npm:typescript@^7.0.2",

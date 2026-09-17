@@ -1,5 +1,5 @@
 {
-  "name": "@petrea/binding-wasm32-wasip1",
+  "name": "@petrea/wasm",
   "type": "module",
   "version": "0.0.0",
   "description": "WebAssembly binding for petrea (wasm32-wasip1)",
