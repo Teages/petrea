@@ -78,7 +78,7 @@ jobs:
   # assemble the binding packages from the prebuilt binaries, then STAGE the
   # whole batch: every @petrea/binding-* package first, then the main `petrea`
   # package whose optionalDependencies pin their exact versions. Nothing goes
-  # live from CI — `npm stage publish` only queues the versions; a maintainer
+  # live from CI — `pnpm stage publish` only queues the versions; a maintainer
   # approves each one interactively (`npm stage approve <stage-id>`, 2FA).
   # Approval order matters: approve the bindings before petrea, so the main
   # package never becomes installable while its optionalDependencies are
@@ -98,11 +98,12 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: npm i -g corepack@latest && corepack enable
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      # pnpm and the Node runtime (both from devEngines) in one step;
+      # replaces corepack, which Node 26 removes
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
         with:
-          node-version: 22
-          cache: pnpm
+          cache: true
+          install: false
       # staged publishing needs 11.15 at minimum; the runner's bundled npm
       # trails that. No auth token is configured: npm exchanges the Actions
       # OIDC token for a stage credential itself — the trusted publishers on
@@ -126,7 +127,7 @@ jobs:
       - name: Resync lockfile with the assembled manifests
         run: pnpm install --no-frozen-lockfile
       # a rerun after a partial failure must not collide with the versions
-      # that already made it out. `npm view` only sees approved versions: a
+      # that already made it out. `pnpm view` only sees approved versions: a
       # version that is still staged makes staging conflict — reject or
       # approve it first, then rerun
       - name: Stage @petrea/binding-* packages
@@ -135,11 +136,11 @@ jobs:
             local pkg_name pkg_version
             pkg_name=$(node -p "require('./package.json').name")
             pkg_version=$(node -p "require('./package.json').version")
-            if npm view "${pkg_name}@${pkg_version}" version >/dev/null 2>&1; then
+            if pnpm view "${pkg_name}@${pkg_version}" version >/dev/null 2>&1; then
               echo "Skipping ${pkg_name}@${pkg_version} (already published)"
               return 0
             fi
-            npm stage publish --provenance --access public --tag "$NPM_TAG"
+            pnpm stage publish --provenance --access public --tag "$NPM_TAG"
           }
           for pkg in npm/*/; do
             if [ -f "$pkg/package.json" ]; then
@@ -151,10 +152,10 @@ jobs:
         run: |
           PKG_NAME=$(node -p "require('./package.json').name")
           PKG_VERSION=$(node -p "require('./package.json').version")
-          if npm view "${PKG_NAME}@${PKG_VERSION}" version >/dev/null 2>&1; then
+          if pnpm view "${PKG_NAME}@${PKG_VERSION}" version >/dev/null 2>&1; then
             echo "Skipping ${PKG_NAME}@${PKG_VERSION} (already published)"
             exit 0
           fi
           # packing runs prepack, which builds dist/ from src/; the binding
           # packages ride along through optionalDependencies
-          npm stage publish --provenance --access public --tag "$NPM_TAG"
+          pnpm stage publish --provenance --access public --tag "$NPM_TAG"

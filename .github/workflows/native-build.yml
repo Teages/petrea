@@ -76,16 +76,10 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - if: runner.os != 'Windows'
-        run: npm i -g corepack@latest && corepack enable
-      # the windows image ships corepack; reinstalling it globally collides
-      # with the preinstalled yarn shims (npm EEXIST)
-      - if: runner.os == 'Windows'
-        run: corepack enable
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
         with:
-          node-version: 22
-          cache: pnpm
+          cache: true
+          install: false
       - run: pnpm install
       - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
