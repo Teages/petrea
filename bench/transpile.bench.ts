@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { transpile as transpileOxidase } from 'oxidase'
 import tsBlankSpace from 'ts-blank-space'
-import { bench, describe } from 'vitest'
+import { describe, it } from 'vitest'
 import { transpile, transpileSync } from '../src/index'
 
 const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), '../test/fixture')
@@ -60,25 +60,25 @@ describe('transpile', () => {
     tsBlankSpace(input, tsBlankSpaceThrows ? () => {} : undefined)
     transpileSync(input, options)
 
-    describe(name, () => {
+    it(name, async ({ bench }) => {
       // vitest's summary baselines the fastest implementation per scenario;
       // oxidase (a no-AST Rust pipeline) is the reference point on small
       // inputs and enum-heavy transformations
-      bench('oxidase', () => {
+      await bench('oxidase', () => {
         transpileOxidase(input)
-      })
+      }).run()
 
-      bench('ts-blank-space', () => {
+      await bench('ts-blank-space', () => {
         tsBlankSpace(input, tsBlankSpaceThrows ? () => {} : undefined)
-      })
+      }).run()
 
-      bench('transpileSync', () => {
+      await bench('transpileSync', () => {
         transpileSync(input, options)
-      })
+      }).run()
 
-      bench('transpile (async)', async () => {
+      await bench('transpile (async)', async () => {
         await transpile(input, options)
-      })
+      }).run()
     })
   }
 })
