@@ -9,19 +9,19 @@ description = "Native Rust implementation of petrea"
 crate-type = ["cdylib"]
 
 [dependencies]
-napi = { version = "3", default-features = false, features = ["napi8"] }
-napi-derive = "3"
-oxc_allocator = { version = "0.148.0", features = ["pool"] }
-oxc_parser = "0.148.0"
-oxc_ast = "0.148.0"
-oxc_ast_visit = "0.148.0"
-oxc_span = "0.148.0"
-oxc_syntax = "0.148.0"
-dtoa = "1"
-oxc_diagnostics = "0.148.0"
+napi = { version = "3.12.6", default-features = false, features = ["napi8"] }
+napi-derive = "3.6.7"
+oxc_allocator = { version = "0.150.0", features = ["pool"] }
+oxc_parser = "0.150.0"
+oxc_ast = "0.150.0"
+oxc_ast_visit = "0.150.0"
+oxc_span = "0.150.0"
+oxc_syntax = "0.150.0"
+dtoa = "1.0.11"
+oxc_diagnostics = "0.150.0"
 
 [build-dependencies]
-napi-build = "2"
+napi-build = "2.4.3"
 
 [profile.release]
 lto = "thin"
