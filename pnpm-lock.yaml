@@ -176,7 +176,7 @@ importers:
         specifier: 2.0.0-alpha.5
         version: 2.0.0-alpha.5
       '@napi-rs/cli':
-        specifier: ^3.10.0
+        specifier: ^3.10.3
         version: 3.10.3(@emnapi/core@2.0.0-alpha.5)(@emnapi/runtime@2.0.0-alpha.5)(@types/node@24.13.5)(emnapi@2.0.0-alpha.5)
       '@napi-rs/wasm-runtime':
         specifier: ^1.2.4
@@ -188,7 +188,7 @@ importers:
         specifier: ^0.10.4
         version: 0.10.4
       '@types/node':
-        specifier: ^24.13.4
+        specifier: ^24.13.5
         version: 24.13.5
       '@typescript/native':
         specifier: npm:typescript@^7.0.2
