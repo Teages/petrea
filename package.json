@@ -98,7 +98,7 @@
     "@antfu/eslint-config": "^9.5.1",
     "@emnapi/core": "2.0.0-alpha.5",
     "@emnapi/runtime": "2.0.0-alpha.5",
-    "@napi-rs/cli": "^3.10.5",
+    "@napi-rs/cli": "^3.10.6",
     "@napi-rs/wasm-runtime": "^1.2.4",
     "@petrea/wasm": "workspace:*",
     "@tybys/wasm-util": "^0.10.4",
@@ -114,7 +114,7 @@
     "pkg-pr-new": "^0.0.88",
     "ts-blank-space": "^0.9.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "vite": "^8.3.1",
+    "vite": "^8.3.2",
     "vitest": "^5.0.3"
   },
   "publishConfig": {
