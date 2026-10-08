@@ -5,12 +5,12 @@
   "devEngines": {
     "runtime": {
       "name": "node",
-      "version": "^24.0.0",
+      "version": "^24.21.0",
       "onFail": "download"
     },
     "packageManager": {
       "name": "pnpm",
-      "version": "12.4.1",
+      "version": "12.9.1",
       "onFail": "download"
     }
   },
@@ -96,20 +96,20 @@
   },
   "devDependencies": {
     "@antfu/eslint-config": "^9.5.1",
-    "@emnapi/core": "2.0.0-alpha.5",
-    "@emnapi/runtime": "2.0.0-alpha.5",
-    "@napi-rs/cli": "^3.10.6",
-    "@napi-rs/wasm-runtime": "^1.2.4",
+    "@emnapi/core": "2.0.0-alpha.6",
+    "@emnapi/runtime": "2.0.0-alpha.6",
+    "@napi-rs/cli": "^3.10.7",
+    "@napi-rs/wasm-runtime": "^1.2.5",
     "@petrea/wasm": "workspace:*",
     "@tybys/wasm-util": "^0.10.4",
-    "@types/node": "^24.19.0",
+    "@types/node": "^24.19.1",
     "@typescript/native": "npm:typescript@^7.0.2",
     "@vitest/coverage-v8": "^5.0.3",
-    "emnapi": "2.0.0-alpha.5",
-    "eslint": "^10.11.0",
+    "emnapi": "2.0.0-alpha.6",
+    "eslint": "^10.12.0",
     "jiti": "2.7.0",
     "obuild": "^0.4.43",
-    "oxc-parser": "^0.152.0",
+    "oxc-parser": "^0.153.0",
     "oxidase": "^0.0.3",
     "pkg-pr-new": "^0.0.88",
     "ts-blank-space": "^0.9.0",
