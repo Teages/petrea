@@ -10,7 +10,7 @@
     },
     "packageManager": {
       "name": "pnpm",
-      "version": "12.9.1",
+      "version": "12.10.1",
       "onFail": "download"
     }
   },
@@ -98,7 +98,7 @@
     "@antfu/eslint-config": "^9.5.1",
     "@emnapi/core": "2.0.0-alpha.6",
     "@emnapi/runtime": "2.0.0-alpha.6",
-    "@napi-rs/cli": "^3.10.7",
+    "@napi-rs/cli": "^3.10.8",
     "@napi-rs/wasm-runtime": "^1.2.5",
     "@petrea/wasm": "workspace:*",
     "@tybys/wasm-util": "^0.10.4",
@@ -111,10 +111,10 @@
     "obuild": "^0.4.43",
     "oxc-parser": "^0.153.0",
     "oxidase": "^0.0.3",
-    "pkg-pr-new": "^0.0.88",
+    "pkg-pr-new": "^0.0.90",
     "ts-blank-space": "^0.9.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "vite": "^8.3.2",
+    "vite": "^8.3.3",
     "vitest": "^5.0.3"
   },
   "publishConfig": {
