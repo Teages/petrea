@@ -5,12 +5,12 @@
   "devEngines": {
     "runtime": {
       "name": "node",
-      "version": "^24.21.0",
+      "version": "^24.22.0",
       "onFail": "download"
     },
     "packageManager": {
       "name": "pnpm",
-      "version": "12.11.2",
+      "version": "12.13.0",
       "onFail": "download"
     }
   },
@@ -96,26 +96,26 @@
   },
   "devDependencies": {
     "@antfu/eslint-config": "^9.5.1",
-    "@emnapi/core": "2.0.0-alpha.6",
-    "@emnapi/runtime": "2.0.0-alpha.6",
+    "@emnapi/core": "2.0.0-beta.1",
+    "@emnapi/runtime": "2.0.0-beta.1",
     "@napi-rs/cli": "^3.10.8",
     "@napi-rs/wasm-runtime": "^1.2.5",
     "@petrea/wasm": "workspace:*",
     "@tybys/wasm-util": "^0.10.4",
     "@types/node": "^24.19.2",
     "@typescript/native": "npm:typescript@^7.0.2",
-    "@vitest/coverage-v8": "^5.0.3",
-    "emnapi": "2.0.0-alpha.6",
+    "@vitest/coverage-v8": "^5.0.4",
+    "emnapi": "2.0.0-beta.1",
     "eslint": "^10.12.0",
     "jiti": "2.7.0",
-    "obuild": "^0.4.44",
-    "oxc-parser": "^0.153.0",
+    "obuild": "^0.4.45",
+    "oxc-parser": "^0.154.0",
     "oxidase": "^0.0.3",
     "pkg-pr-new": "^0.0.91",
     "ts-blank-space": "^0.9.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "vite": "^8.3.4",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.4"
   },
   "publishConfig": {
     "access": "public",
