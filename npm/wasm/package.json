@@ -45,8 +45,8 @@
     "provenance": true
   },
   "dependencies": {
-    "@emnapi/core": "2.0.0-alpha.6",
-    "@emnapi/runtime": "2.0.0-alpha.6",
-    "@napi-rs/wasm-runtime": "~1.2.5"
+    "@emnapi/core": "2.0.0-beta.2",
+    "@emnapi/runtime": "2.0.0-beta.2",
+    "@napi-rs/wasm-runtime": "~1.2.6"
   }
 }
