@@ -10,7 +10,7 @@
     },
     "packageManager": {
       "name": "pnpm",
-      "version": "12.15.0",
+      "version": "12.16.1",
       "onFail": "download"
     }
   },
@@ -109,7 +109,7 @@
     "eslint": "^10.13.0",
     "jiti": "2.7.0",
     "obuild": "^0.4.45",
-    "oxc-parser": "^0.155.0",
+    "oxc-parser": "^0.156.0",
     "oxidase": "^0.0.3",
     "pkg-pr-new": "^0.0.92",
     "ts-blank-space": "^0.9.0",
