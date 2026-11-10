@@ -16,7 +16,7 @@
   },
   "description": "A type-stripper that blanks TypeScript-only syntax using the oxc parser, preserving line and column positions.",
   "license": "MIT",
-  "repository": "Teages/petrea",
+  "repository": "nuxt-contrib/petrea",
   "sideEffects": false,
   "exports": {
     ".": {
