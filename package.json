@@ -95,7 +95,7 @@
     }
   },
   "devDependencies": {
-    "@antfu/eslint-config": "^9.5.1",
+    "@antfu/eslint-config": "^10.0.0",
     "@emnapi/core": "2.0.0-beta.3",
     "@emnapi/runtime": "2.0.0-beta.3",
     "@napi-rs/cli": "^3.10.12",
